@@ -1,0 +1,262 @@
+[
+  {
+    "prompt": "a person walks to a destination.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.5,
+      0.0
+    ],
+    "idx": 1
+  },
+  {
+    "prompt": "a person walks to the other side of the room.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      3.0,
+      0.0
+    ],
+    "idx": 2
+  },
+  {
+    "prompt": "a person walks towards a point ahead of them.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.0,
+      0.0
+    ],
+    "idx": 3
+  },
+  {
+    "prompt": "a person walks diagonally to a target position.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.0,
+      2.0
+    ],
+    "idx": 4
+  },
+  {
+    "prompt": "a person walks to a spot on their left.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      0.0,
+      2.0
+    ],
+    "idx": 5
+  },
+  {
+    "prompt": "a person walks to a spot on their right.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      0.0,
+      -2.0
+    ],
+    "idx": 6
+  },
+  {
+    "prompt": "a person runs to a destination and stops.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      3.5,
+      0.0
+    ],
+    "idx": 7
+  },
+  {
+    "prompt": "a person jogs towards a goal and decelerates to a stop.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      4.0,
+      0.0
+    ],
+    "idx": 8
+  },
+  {
+    "prompt": "a person walks briskly to a meeting point.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.5,
+      1.0
+    ],
+    "idx": 9
+  },
+  {
+    "prompt": "a person walks casually to a chair and sits down.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.0,
+      0.5
+    ],
+    "idx": 10
+  },
+  {
+    "prompt": "a person moves towards the camera.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      1.5,
+      0.0
+    ],
+    "idx": 11
+  },
+  {
+    "prompt": "a person walks to the far end of the stage.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      5.0,
+      0.0
+    ],
+    "idx": 12
+  },
+  {
+    "prompt": "a person walks to a nearby object and bends down.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      1.5,
+      0.5
+    ],
+    "idx": 13
+  },
+  {
+    "prompt": "a person approaches and stops at a specific location.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.0,
+      -1.0
+    ],
+    "idx": 14
+  },
+  {
+    "prompt": "a person walks to a corner of the room.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.5,
+      -2.5
+    ],
+    "idx": 15
+  },
+  {
+    "prompt": "a person strides purposefully to a destination.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      3.0,
+      1.0
+    ],
+    "idx": 16
+  },
+  {
+    "prompt": "a person hurries to a specific point.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      3.0,
+      0.0
+    ],
+    "idx": 17
+  },
+  {
+    "prompt": "a person saunters to a position and turns around.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      2.0,
+      0.0
+    ],
+    "idx": 18
+  },
+  {
+    "prompt": "a person runs across the field to the opposite end.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      6.0,
+      0.0
+    ],
+    "idx": 19
+  },
+  {
+    "prompt": "a person walks backwards to a target position behind them.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact",
+      "terminal"
+    ],
+    "terminal_xz": [
+      -1.5,
+      0.0
+    ],
+    "idx": 20
+  }
+]

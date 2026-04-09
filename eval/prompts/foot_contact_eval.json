@@ -1,0 +1,482 @@
+[
+  {
+    "prompt": "a person walks forward and stops",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 1
+  },
+  {
+    "prompt": "a person walks forward.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 2
+  },
+  {
+    "prompt": "a person walks forward, moving arms and legs while looking left and right.",
+    "duration": 6.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 3
+  },
+  {
+    "prompt": "a person walks with a limp, their left leg is injured.",
+    "duration": 6.4,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 4
+  },
+  {
+    "prompt": "a person walks on a tightrope.",
+    "duration": 6.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 5
+  },
+  {
+    "prompt": "a person walks like a zombie, dragging their feet forward.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 6
+  },
+  {
+    "prompt": "a person walks forward, holding a tray at shoulder height with one hand.",
+    "duration": 3.1,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 7
+  },
+  {
+    "prompt": "a person walks in a catwalk style, swinging their left arm while placing their right hand on their hip.",
+    "duration": 6.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 8
+  },
+  {
+    "prompt": "a person walks unsteadily, then slowly sits down.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 9
+  },
+  {
+    "prompt": "a person turns backward 180 degrees, then walks forward.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 10
+  },
+  {
+    "prompt": "a person runs forward.",
+    "duration": 2.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 11
+  },
+  {
+    "prompt": "a person runs and then slows down",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 12
+  },
+  {
+    "prompt": "a person runs forward, then kicks a soccer ball.",
+    "duration": 2.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 13
+  },
+  {
+    "prompt": "a person sprints forward.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 14
+  },
+  {
+    "prompt": "a person jogs in a circle.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 15
+  },
+  {
+    "prompt": "a person jogs forward at a moderate pace.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 16
+  },
+  {
+    "prompt": "a person runs in a zigzag pattern.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 17
+  },
+  {
+    "prompt": "a person marches in place, swinging their arms forward and backward.",
+    "duration": 7.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 18
+  },
+  {
+    "prompt": "a person walks backward slowly.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 19
+  },
+  {
+    "prompt": "a person walks sideways to the right.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 20
+  },
+  {
+    "prompt": "a person shuffles forward with small steps.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 21
+  },
+  {
+    "prompt": "a person walks quickly, then abruptly stops.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 22
+  },
+  {
+    "prompt": "a person struts confidently with wide steps.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 23
+  },
+  {
+    "prompt": "a person walks while looking around cautiously.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 24
+  },
+  {
+    "prompt": "a person jogs on the spot.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 25
+  },
+  {
+    "prompt": "the man walked forward, spun right on one foot and walked back to his original position.",
+    "duration": 3.1,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 26
+  },
+  {
+    "prompt": "this person stumbles left and right while moving forward.",
+    "duration": 4.4,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 27
+  },
+  {
+    "prompt": "a person lifts a long gun, then walks forward slowly.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 28
+  },
+  {
+    "prompt": "a person walks forward then turns left.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 29
+  },
+  {
+    "prompt": "a person walks forward then turns right.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 30
+  },
+  {
+    "prompt": "a person dances.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 31
+  },
+  {
+    "prompt": "a person dances bachata, executing rhythmic hip movements and footwork.",
+    "duration": 8.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 32
+  },
+  {
+    "prompt": "a person dances jazz, jumping rhythmically.",
+    "duration": 8.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 33
+  },
+  {
+    "prompt": "a person performs a waltz step.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 34
+  },
+  {
+    "prompt": "a person does a hip-hop dance.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 35
+  },
+  {
+    "prompt": "a person shuffles in a dance move.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 36
+  },
+  {
+    "prompt": "a person performs a line dance with footwork.",
+    "duration": 6.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 37
+  },
+  {
+    "prompt": "a person does a salsa step.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 38
+  },
+  {
+    "prompt": "a person performs a contemporary dance routine.",
+    "duration": 6.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 39
+  },
+  {
+    "prompt": "a person dances in place with rhythmic foot tapping.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 40
+  },
+  {
+    "prompt": "a person performs a breakdance toprock.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 41
+  },
+  {
+    "prompt": "a person does a two-step dance.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 42
+  },
+  {
+    "prompt": "a person dances flamenco, stamping their feet rhythmically.",
+    "duration": 6.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 43
+  },
+  {
+    "prompt": "a person performs a Scottish reel step.",
+    "duration": 5.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 44
+  },
+  {
+    "prompt": "a person does a moonwalk step.",
+    "duration": 4.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 45
+  },
+  {
+    "prompt": "a person jumps upward with both legs twice.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 46
+  },
+  {
+    "prompt": "a person jumps on their right leg.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 47
+  },
+  {
+    "prompt": "a person jumps up.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 48
+  },
+  {
+    "prompt": "a person jumps forward lightly, taking two steps.",
+    "duration": 2.3,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 49
+  },
+  {
+    "prompt": "a person performs a taekwondo kick, extending their leg forcefully.",
+    "duration": 2.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 50
+  },
+  {
+    "prompt": "a person performs a side kick.",
+    "duration": 2.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 51
+  },
+  {
+    "prompt": "a person does a front kick followed by a spin.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 52
+  },
+  {
+    "prompt": "a person climbs upward, moving up a slope.",
+    "duration": 2.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 53
+  },
+  {
+    "prompt": "a person practices tai chi, performing slow, controlled movements.",
+    "duration": 9.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 54
+  },
+  {
+    "prompt": "a person skips forward.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 55
+  },
+  {
+    "prompt": "a person hops on one foot.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 56
+  },
+  {
+    "prompt": "a person does a cartwheel.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 57
+  },
+  {
+    "prompt": "a person performs a standing long jump.",
+    "duration": 2.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 58
+  },
+  {
+    "prompt": "a person runs and jumps over an obstacle.",
+    "duration": 3.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 59
+  },
+  {
+    "prompt": "a person dodges to the side quickly.",
+    "duration": 2.0,
+    "constraint": [
+      "foot_contact"
+    ],
+    "idx": 60
+  }
+]
