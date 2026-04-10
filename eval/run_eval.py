@@ -74,7 +74,6 @@ from steering import (
     FlowSteerer,
     FootContactConstraint,
     MotionDecoder,
-    PerConstraintScheduler,
     StagedScheduler,
     TerminalConstraint,
 )
@@ -146,40 +145,29 @@ def load_pipeline(model_path: str, device: torch.device):
 # Per-prompt helpers
 # ---------------------------------------------------------------------------
 
-def build_timed_constraints(prompt_cfg: Dict, args) -> list:
+def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
     """
-    Build a list of (BaseConstraint, weight, t_start, t_end) tuples for the
-    time-staged composite path.
+    Build a static CompositeConstraint for the given prompt.
 
-    At each ODE step t, only constraints with t_start <= t <= t_end are included
-    in the composite loss.  A single StagedScheduler controls the overall alpha.
-    This preserves the FK-chain temporal smoothness of the composite gradient while
-    applying different constraints in the ODE phases where they are most effective:
-
-        terminal  →  early phase  [0.0, 0.6]  (global trajectory structure)
-        contact   →  late  phase  [0.6, 1.0]  (fine-grained physical detail)
+    Stage 1 configuration (best results):
+        foot_contact  → weight 1.0  (full sequence, α=15 via StagedScheduler)
+        terminal      → weight 1.5  (full sequence, α=80 via StagedScheduler)
     """
     constraint_types = prompt_cfg.get("constraint", args.constraint)
-    has_contact  = "foot_contact" in constraint_types
-    has_terminal = "terminal"     in constraint_types
-    timed = []
+    constraint_list = []
 
-    if has_contact:
+    if "foot_contact" in constraint_types:
         fc = FootContactConstraint(height_thresh=0.05, vel_thresh=0.02)
-        # Combined with terminal: take the late phase to avoid disrupting
-        # terminal's global convergence.  Contact-only: full window from t=0.
-        t_start = 0.6 if has_terminal else 0.0
-        timed.append((fc, 1.0, t_start, 1.0))
+        constraint_list.append((fc, 1.0))
 
-    if has_terminal:
+    if "terminal" in constraint_types:
         xz = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
         target = torch.tensor([[xz[0], 0.9, xz[1]]], dtype=torch.float32)
         tc = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
-        t_end = 0.6 if has_contact else 0.75
-        timed.append((tc, 1.0, 0.0, t_end))
+        constraint_list.append((tc, 1.5))
 
-    assert timed, f"No constraints for prompt: {prompt_cfg['prompt']}"
-    return timed
+    assert constraint_list, f"No constraints for prompt: {prompt_cfg['prompt']}"
+    return CompositeConstraint(constraint_list)
 
 
 def extract_terminal_targets(prompt_cfg: Dict, args) -> Optional[List]:
@@ -259,18 +247,22 @@ def run_eval(args):
         duration = prompt_cfg.get("duration", 3.0)
         print(f"\n[{global_idx}/{len(prompts)}] {prompt!r}  ({duration}s)")
 
-        # --- Build time-staged composite constraints ---
-        timed_constraints = build_timed_constraints(prompt_cfg, args)
-        terminal_targets  = extract_terminal_targets(prompt_cfg, args)
+        # --- Build constraints and scheduler (Stage 1 config) ---
+        constraints      = build_constraints_for_prompt(prompt_cfg, args)
+        terminal_targets = extract_terminal_targets(prompt_cfg, args)
 
-        # Constant alpha schedule: one α controls magnitude for whichever
-        # constraint is active at each ODE step.
-        scheduler = StagedScheduler.constant(alpha_max=args.alpha_max)
+        # StagedScheduler: terminal+waypoint at α=alpha_terminal for t∈[0,0.9],
+        # contact at α=alpha_contact for t∈[0.9,1.0] (weaker to avoid jerk).
+        scheduler = StagedScheduler.make_staged(
+            alpha_terminal=args.alpha_terminal,
+            alpha_waypoint=args.alpha_terminal,
+            alpha_contact=args.alpha_contact,
+        )
 
         steerer = FlowSteerer(
             pipeline=pipeline,
             decoder=decoder,
-            timed_constraints=timed_constraints,
+            constraints=constraints,
             scheduler=scheduler,
             steps=args.steps,
             smooth_kernel=args.smooth_kernel,
@@ -499,9 +491,13 @@ def main():
                         choices=["foot_contact", "terminal"])
     parser.add_argument("--terminal_x",  type=float, default=2.0)
     parser.add_argument("--terminal_z",  type=float, default=0.0)
-    parser.add_argument("--alpha_max",    type=float, default=80.0,
-                        help="Steering strength α applied to whichever constraint is "
-                             "active at each ODE step.")
+    parser.add_argument("--alpha_terminal", type=float, default=80.0,
+                        help="Peak steering strength for terminal/waypoint constraints "
+                             "(StagedScheduler stages [0,0.7] and [0.2,0.9]).")
+    parser.add_argument("--alpha_contact",  type=float, default=15.0,
+                        help="Steering strength for foot-contact constraint "
+                             "(StagedScheduler stage [0.5,1.0]). "
+                             "Keep lower than alpha_terminal to avoid jerk.")
     parser.add_argument("--steps",        type=int,   default=50)
     parser.add_argument("--smooth_kernel", type=int,  default=5,
                         help="Temporal smoothing window for steering vector (odd int). "
