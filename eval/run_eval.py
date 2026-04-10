@@ -74,6 +74,7 @@ from steering import (
     FlowSteerer,
     FootContactConstraint,
     MotionDecoder,
+    PerConstraintScheduler,
     StagedScheduler,
     TerminalConstraint,
 )
@@ -145,22 +146,44 @@ def load_pipeline(model_path: str, device: torch.device):
 # Per-prompt helpers
 # ---------------------------------------------------------------------------
 
-def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
+def build_constraint_schedulers(prompt_cfg: Dict, args) -> list:
+    """
+    Build a list of (BaseConstraint, StagedScheduler) pairs for per-constraint
+    steering.  Each constraint gets an independent gradient and alpha schedule,
+    preventing a high-magnitude constraint from suppressing a low-magnitude one.
+    """
     constraint_types = prompt_cfg.get("constraint", args.constraint)
-    constraint_list  = []
+    pairs = []
 
     if "foot_contact" in constraint_types:
         fc = FootContactConstraint(height_thresh=0.05, vel_thresh=0.02)
-        constraint_list.append((fc, 1.0))
+        # Contact is most effective in the late ODE phase (fine detail forming).
+        # Linear ramp avoids a sudden jerk at the start of the active window.
+        sched = StagedScheduler(
+            alpha_max=args.alpha_contact,
+            mode="linear_ramp",
+            t_start=0.4,
+            t_end=1.0,
+            warmup_frac=0.2,
+        )
+        pairs.append((fc, sched))
 
     if "terminal" in constraint_types:
         xz = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
         target = torch.tensor([[xz[0], 0.9, xz[1]]], dtype=torch.float32)
         tc = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
-        constraint_list.append((tc, 1.5))
+        # Terminal is most effective in the early-to-mid ODE phase (global structure).
+        sched = StagedScheduler(
+            alpha_max=args.alpha_terminal,
+            mode="linear_ramp",
+            t_start=0.0,
+            t_end=0.8,
+            warmup_frac=0.1,
+        )
+        pairs.append((tc, sched))
 
-    assert constraint_list, f"No constraints for prompt: {prompt_cfg['prompt']}"
-    return CompositeConstraint(constraint_list)
+    assert pairs, f"No constraints for prompt: {prompt_cfg['prompt']}"
+    return pairs
 
 
 def extract_terminal_targets(prompt_cfg: Dict, args) -> Optional[List]:
@@ -240,28 +263,16 @@ def run_eval(args):
         duration = prompt_cfg.get("duration", 3.0)
         print(f"\n[{global_idx}/{len(prompts)}] {prompt!r}  ({duration}s)")
 
-        # --- Build constraints ---
-        constraints      = build_constraints_for_prompt(prompt_cfg, args)
-        terminal_targets = extract_terminal_targets(prompt_cfg, args)
-
-        # --- Scheduler ---
-        if args.scheduler == "cosine":
-            scheduler = StagedScheduler.cosine(alpha_max=args.alpha_max)
-        elif args.scheduler == "constant":
-            scheduler = StagedScheduler.constant(alpha_max=args.alpha_max)
-        else:
-            scheduler = StagedScheduler.make_staged(
-                alpha_terminal=args.alpha_terminal,
-                alpha_waypoint=args.alpha_terminal,
-                alpha_contact=args.alpha_contact,
-            )
+        # --- Build per-constraint (constraint, scheduler) pairs ---
+        constraint_schedulers = build_constraint_schedulers(prompt_cfg, args)
+        terminal_targets      = extract_terminal_targets(prompt_cfg, args)
 
         steerer = FlowSteerer(
             pipeline=pipeline,
             decoder=decoder,
-            constraints=constraints,
-            scheduler=scheduler,
+            constraint_schedulers=constraint_schedulers,
             steps=args.steps,
+            smooth_kernel=args.smooth_kernel,
             verbose=args.verbose,
         )
 
@@ -494,9 +505,14 @@ def main():
     parser.add_argument("--alpha_contact",  type=float, default=15.0,
                         help="Alpha for foot contact constraint (staged scheduler). "
                              "Keep well below alpha_terminal; contact gradient is noisy.")
-    parser.add_argument("--steps",       type=int,   default=50)
+    parser.add_argument("--steps",        type=int,   default=50)
+    parser.add_argument("--smooth_kernel", type=int,  default=5,
+                        help="Temporal smoothing window for steering vector (odd int). "
+                             "Suppresses high-frequency jerk. Set to 1 to disable.")
     parser.add_argument("--scheduler",   default="staged",
-                        choices=["constant", "cosine", "staged"])
+                        choices=["constant", "cosine", "staged"],
+                        help="Legacy arg retained for cosine/constant single-alpha runs. "
+                             "Per-constraint steering ignores this.")
     parser.add_argument("--seeds",       default="42",
                         help="Comma-separated seed list (one motion per seed). "
                              "For Phase-1 eval use: 42,43,44")

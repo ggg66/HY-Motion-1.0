@@ -37,7 +37,7 @@ import torch.nn.functional as F
 
 from .constraints import BaseConstraint, CompositeConstraint
 from .decode import MotionDecoder
-from .scheduler import StagedScheduler
+from .scheduler import PerConstraintScheduler, StagedScheduler
 
 
 class FlowSteerer:
@@ -60,6 +60,7 @@ class FlowSteerer:
         decoder: MotionDecoder,
         constraints: Optional[Union[CompositeConstraint, BaseConstraint]] = None,
         scheduler: Optional[StagedScheduler] = None,
+        constraint_schedulers: Optional[List[tuple]] = None,
         steps: Optional[int] = None,
         grad_clip: float = 1.0,
         smooth_kernel: int = 5,
@@ -67,11 +68,16 @@ class FlowSteerer:
     ):
         self.pipeline = pipeline
         self.decoder = decoder
+        # Per-constraint path (preferred): list of (BaseConstraint, StagedScheduler)
+        # Each constraint gets its own independent gradient and alpha schedule.
+        self.constraint_schedulers = constraint_schedulers
+        # Legacy composite path: single CompositeConstraint + single StagedScheduler.
+        # Used only when constraint_schedulers is None.
         self.constraints = constraints
         self.scheduler = scheduler or StagedScheduler.cosine(alpha_max=0.0)
         self.steps = steps or pipeline.validation_steps
         self.grad_clip = grad_clip
-        self.smooth_kernel = smooth_kernel  # temporal smoothing window for steering vector
+        self.smooth_kernel = smooth_kernel
         self.verbose = verbose
 
     # ------------------------------------------------------------------
@@ -189,12 +195,24 @@ class FlowSteerer:
             v = velocity_fn(t_cur, x)   # (B, T_max, 201)
 
             # Constraint steering
-            alpha = self.scheduler(t_cur) if self.constraints is not None else 0.0
-            if alpha > 0.0 and self.constraints is not None:
-                steering, loss_val = self._compute_steering(x, v, t_cur, length)
-                v = v + alpha * steering
-                if self.verbose:
-                    print(f"  step {i:3d} | t={t_cur:.3f} | α={alpha:.1f} | loss={loss_val:.5f}")
+            if self.constraint_schedulers is not None:
+                # Per-constraint path: independent gradient + alpha per constraint.
+                active = [(c, s) for c, s in self.constraint_schedulers if s(t_cur) > 0.0]
+                if active:
+                    steering, loss_val = self._compute_steering_per_constraint(
+                        x, v, t_cur, length, active
+                    )
+                    v = v + steering
+                    if self.verbose:
+                        print(f"  step {i:3d} | t={t_cur:.3f} | loss={loss_val:.5f}")
+            elif self.constraints is not None:
+                # Legacy composite path.
+                alpha = self.scheduler(t_cur)
+                if alpha > 0.0:
+                    steering, loss_val = self._compute_steering(x, v, t_cur, length)
+                    v = v + alpha * steering
+                    if self.verbose:
+                        print(f"  step {i:3d} | t={t_cur:.3f} | α={alpha:.1f} | loss={loss_val:.5f}")
 
             x = x + dt * v
 
@@ -260,6 +278,66 @@ class FlowSteerer:
 
         return steering.detach(), loss_val
 
+    def _compute_steering_per_constraint(
+        self,
+        x: Tensor,
+        v: Tensor,
+        t: float,
+        length: int,
+        active_pairs: list,   # [(BaseConstraint, StagedScheduler), ...] pre-filtered α > 0
+    ) -> tuple[Tensor, float]:
+        """
+        Per-constraint steering.
+
+        Each constraint is independently backpropagated through the shared
+        x_t → x̂_1 → joints graph, normalized separately, then scaled by its
+        own α(t) and accumulated in latent space:
+
+            steering = Σ_i  α_i(t) · -Norm(∇_{x_t} L_i)
+
+        This prevents a high-magnitude constraint (e.g. terminal, ~metres error)
+        from dominating the gradient direction and suppressing a low-magnitude
+        one (e.g. contact, ~centimetres error).
+
+        Returns:
+            (total_steering, sum_of_loss_values)
+            total_steering: (B, T_max, 201) ready to be added to velocity
+        """
+        x_req = x.detach().requires_grad_(True)
+        x1_hat = x_req + (1.0 - t) * v.detach()       # (B, T_max, 201)
+        latent_crop = x1_hat[:, :length, :]            # (B, L, 201)
+        joints = self.decoder(latent_crop)              # (B, L, 22, 3)  shared graph
+
+        B, T_max, D = x.shape
+        total_steering = x.new_zeros(B, T_max, D)
+        total_loss = 0.0
+
+        for idx, (constraint, sched) in enumerate(active_pairs):
+            alpha = sched(t)
+            retain = (idx < len(active_pairs) - 1)   # free graph only on last call
+
+            loss = constraint.loss(joints)
+            total_loss += loss.item()
+
+            grad = torch.autograd.grad(loss, x_req, retain_graph=retain)[0]  # (B, T_max, D)
+
+            grad_flat = grad.view(B, -1)
+            if self.grad_clip < float("inf"):
+                grad_flat = grad_flat.clamp(-self.grad_clip, self.grad_clip)
+            grad_norm = grad_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+            steering_i = -(grad_flat / grad_norm).view(B, T_max, D)
+
+            if self.smooth_kernel > 1:
+                pad = self.smooth_kernel // 2
+                s_t = steering_i.permute(0, 2, 1)
+                s_t = F.avg_pool1d(s_t, kernel_size=self.smooth_kernel,
+                                   stride=1, padding=pad)
+                steering_i = s_t.permute(0, 2, 1)[:, :T_max, :]
+
+            total_steering = total_steering + alpha * steering_i.detach()
+
+        return total_steering, total_loss
+
     # ------------------------------------------------------------------
     # Convenience: build from pipeline path + constraint config
     # ------------------------------------------------------------------
@@ -272,6 +350,7 @@ class FlowSteerer:
         body_model_path: str = "scripts/gradio/static/assets/dump_wooden",
         constraints: Optional[CompositeConstraint] = None,
         scheduler: Optional[StagedScheduler] = None,
+        constraint_schedulers: Optional[List[tuple]] = None,
         steps: int = 50,
         grad_clip: float = 1.0,
         smooth_kernel: int = 5,
@@ -286,6 +365,7 @@ class FlowSteerer:
             decoder=decoder,
             constraints=constraints,
             scheduler=scheduler,
+            constraint_schedulers=constraint_schedulers,
             steps=steps,
             grad_clip=grad_clip,
             smooth_kernel=smooth_kernel,

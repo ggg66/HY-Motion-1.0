@@ -5,7 +5,7 @@ from .constraints import (
     TrajectoryConstraint,
 )
 from .decode import MotionDecoder
-from .scheduler import StagedScheduler
+from .scheduler import PerConstraintScheduler, StagedScheduler
 from .steerer import FlowSteerer
 
 __all__ = [
@@ -16,4 +16,5 @@ __all__ = [
     "TerminalConstraint",
     "TrajectoryConstraint",
     "StagedScheduler",
+    "PerConstraintScheduler",
 ]
