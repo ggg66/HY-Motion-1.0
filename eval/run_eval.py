@@ -157,7 +157,10 @@ def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
     constraint_list = []
 
     if "foot_contact" in constraint_types:
-        fc = FootContactConstraint(height_thresh=0.05, vel_thresh=0.02)
+        fc = FootContactConstraint(
+            height_thresh=0.05, vel_thresh=0.02,
+            detach_mask=not args.no_detach_mask,
+        )
         constraint_list.append((fc, 1.0))
 
     if "terminal" in constraint_types:
@@ -251,13 +254,18 @@ def run_eval(args):
         constraints      = build_constraints_for_prompt(prompt_cfg, args)
         terminal_targets = extract_terminal_targets(prompt_cfg, args)
 
-        # StagedScheduler: terminal+waypoint at α=alpha_terminal for t∈[0,0.9],
-        # contact at α=alpha_contact for t∈[0.9,1.0] (weaker to avoid jerk).
-        scheduler = StagedScheduler.make_staged(
-            alpha_terminal=args.alpha_terminal,
-            alpha_waypoint=args.alpha_terminal,
-            alpha_contact=args.alpha_contact,
-        )
+        if args.scheduler == "staged":
+            scheduler = StagedScheduler.make_staged(
+                alpha_terminal=args.alpha_terminal,
+                alpha_waypoint=args.alpha_terminal,
+                alpha_contact=args.alpha_contact,
+            )
+        elif args.scheduler == "constant":
+            scheduler = StagedScheduler.constant(alpha_max=args.alpha_terminal)
+        elif args.scheduler == "cosine":
+            scheduler = StagedScheduler.cosine(alpha_max=args.alpha_terminal)
+        else:
+            raise ValueError(f"Unknown scheduler: {args.scheduler}")
 
         steerer = FlowSteerer(
             pipeline=pipeline,
@@ -491,6 +499,12 @@ def main():
                         choices=["foot_contact", "terminal"])
     parser.add_argument("--terminal_x",  type=float, default=2.0)
     parser.add_argument("--terminal_z",  type=float, default=0.0)
+    parser.add_argument("--scheduler",      default="staged",
+                        choices=["staged", "constant", "cosine"],
+                        help="Alpha schedule: staged (default), constant, or cosine.")
+    parser.add_argument("--no_detach_mask", action="store_true",
+                        help="[Ablation] Disable contact mask detach — lets gradient "
+                             "reclassify frames as non-contact (original buggy behavior).")
     parser.add_argument("--alpha_terminal", type=float, default=80.0,
                         help="Peak steering strength for terminal/waypoint constraints "
                              "(StagedScheduler stages [0,0.7] and [0.2,0.9]).")

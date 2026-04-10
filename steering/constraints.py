@@ -199,12 +199,14 @@ class FootContactConstraint(BaseConstraint):
         vel_thresh: float = 0.02,
         sigmoid_sharpness: float = 20.0,
         weight: float = 1.0,
+        detach_mask: bool = True,
     ):
         self.foot_joints = foot_joint_indices
         self.height_thresh = height_thresh
         self.vel_thresh = vel_thresh
         self.sharpness = sigmoid_sharpness
         self.weight = weight
+        self.detach_mask = detach_mask
 
     def loss(self, joints: Tensor) -> Tensor:
         """
@@ -212,18 +214,28 @@ class FootContactConstraint(BaseConstraint):
         """
         feet = joints[:, :, self.foot_joints, :]   # (B, T, 4, 3)
 
-        # --- Contact mask: computed on detached joints so the gradient cannot
-        #     "cheat" by reclassifying frames as non-contact (e.g. lifting feet).
-        #     The mask is a fixed binary-ish indicator; only velocity and height
-        #     are differentiable. ---
-        with torch.no_grad():
-            foot_y_det = feet[..., 1].detach()                            # (B, T, 4)
-            floor_y_det = foot_y_det.min(dim=1, keepdim=True).values      # (B, 1, 4)
-            rel_h_det = foot_y_det - floor_y_det                          # (B, T, 4)
-            fvel_det = (feet[:, 1:] - feet[:, :-1]).detach().norm(dim=-1) # (B, T-1, 4)
-            h_mask = torch.sigmoid(-self.sharpness * (rel_h_det[:, :-1] - self.height_thresh))
-            v_mask = torch.sigmoid(-self.sharpness * (fvel_det - self.vel_thresh))
-            contact = h_mask * v_mask   # (B, T-1, 4)  [detached — no grad flows through mask]
+        if self.detach_mask:
+            # --- Contact mask: computed on detached joints so the gradient cannot
+            #     "cheat" by reclassifying frames as non-contact (e.g. lifting feet).
+            #     The mask is a fixed binary-ish indicator; only velocity and height
+            #     are differentiable. ---
+            with torch.no_grad():
+                foot_y_det = feet[..., 1].detach()                            # (B, T, 4)
+                floor_y_det = foot_y_det.min(dim=1, keepdim=True).values      # (B, 1, 4)
+                rel_h_det = foot_y_det - floor_y_det                          # (B, T, 4)
+                fvel_det = (feet[:, 1:] - feet[:, :-1]).detach().norm(dim=-1) # (B, T-1, 4)
+                h_mask = torch.sigmoid(-self.sharpness * (rel_h_det[:, :-1] - self.height_thresh))
+                v_mask = torch.sigmoid(-self.sharpness * (fvel_det - self.vel_thresh))
+                contact = h_mask * v_mask   # (B, T-1, 4)  [detached]
+        else:
+            # --- Ablation: differentiable contact mask (gradient can cheat) ---
+            foot_y_nd = feet[..., 1]                                          # (B, T, 4)
+            floor_y_nd = foot_y_nd.min(dim=1, keepdim=True).values           # (B, 1, 4)
+            rel_h_nd = foot_y_nd - floor_y_nd                                # (B, T, 4)
+            fvel_nd = (feet[:, 1:] - feet[:, :-1]).norm(dim=-1)             # (B, T-1, 4)
+            h_mask = torch.sigmoid(-self.sharpness * (rel_h_nd[:, :-1] - self.height_thresh))
+            v_mask = torch.sigmoid(-self.sharpness * (fvel_nd - self.vel_thresh))
+            contact = h_mask * v_mask   # (B, T-1, 4)  [differentiable]
 
         # --- Differentiable velocity and height: gradient flows here only ---
         foot_vel = (feet[:, 1:] - feet[:, :-1]).norm(dim=-1)   # (B, T-1, 4)
