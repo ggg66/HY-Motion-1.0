@@ -33,6 +33,8 @@ if _repo_root not in sys.path:
 from hymotion.pipeline.motion_diffusion import MotionFlowMatching, length_to_mask
 from hymotion.utils.type_converter import get_module_device
 
+import torch.nn.functional as F
+
 from .constraints import BaseConstraint, CompositeConstraint
 from .decode import MotionDecoder
 from .scheduler import StagedScheduler
@@ -60,6 +62,7 @@ class FlowSteerer:
         scheduler: Optional[StagedScheduler] = None,
         steps: Optional[int] = None,
         grad_clip: float = 1.0,
+        smooth_kernel: int = 5,
         verbose: bool = False,
     ):
         self.pipeline = pipeline
@@ -68,6 +71,7 @@ class FlowSteerer:
         self.scheduler = scheduler or StagedScheduler.cosine(alpha_max=0.0)
         self.steps = steps or pipeline.validation_steps
         self.grad_clip = grad_clip
+        self.smooth_kernel = smooth_kernel  # temporal smoothing window for steering vector
         self.verbose = verbose
 
     # ------------------------------------------------------------------
@@ -231,16 +235,28 @@ class FlowSteerer:
         # Gradient w.r.t. x_req (flows through x_req → x1_hat → joints → loss)
         grad = torch.autograd.grad(loss, x_req)[0]  # (B, T_max, 201)
 
-        # Normalize per-sample (avoid scale sensitivity to α)
-        B = grad.shape[0]
+        B, T_max, D = grad.shape
         grad_flat = grad.view(B, -1)
+
+        # Clip element-wise BEFORE normalizing so outlier latent dims don't
+        # collapse the steering direction into a single dimension.
+        if self.grad_clip < float("inf"):
+            grad_flat = grad_flat.clamp(-self.grad_clip, self.grad_clip)
+
+        # Normalize per-sample so α fully controls magnitude regardless of loss scale.
         grad_norm = grad_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
         grad_flat = grad_flat / grad_norm
 
-        if self.grad_clip < float("inf"):
-            grad_flat = torch.clamp(grad_flat, -self.grad_clip, self.grad_clip)
+        steering = -grad_flat.view(B, T_max, D)   # negative gradient → constraint satisfied
 
-        steering = -grad_flat.view_as(grad)   # negative gradient = ascent → constraint satisfied
+        # Temporal smoothing: suppress high-frequency jerk introduced by steering.
+        # avg_pool1d along the time axis with a small window.
+        if self.smooth_kernel > 1:
+            pad = self.smooth_kernel // 2
+            s_t = steering.permute(0, 2, 1)                                  # (B, D, T_max)
+            s_t = F.avg_pool1d(s_t, kernel_size=self.smooth_kernel,
+                               stride=1, padding=pad)                         # (B, D, T_max)
+            steering = s_t.permute(0, 2, 1)[:, :T_max, :]                    # (B, T_max, D)
 
         return steering.detach(), loss_val
 
@@ -258,6 +274,7 @@ class FlowSteerer:
         scheduler: Optional[StagedScheduler] = None,
         steps: int = 50,
         grad_clip: float = 1.0,
+        smooth_kernel: int = 5,
         verbose: bool = False,
     ) -> "FlowSteerer":
         decoder = MotionDecoder.from_stats_dir(
@@ -271,5 +288,6 @@ class FlowSteerer:
             scheduler=scheduler,
             steps=steps,
             grad_clip=grad_clip,
+            smooth_kernel=smooth_kernel,
             verbose=verbose,
         )

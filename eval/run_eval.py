@@ -250,7 +250,11 @@ def run_eval(args):
         elif args.scheduler == "constant":
             scheduler = StagedScheduler.constant(alpha_max=args.alpha_max)
         else:
-            scheduler = StagedScheduler.make_staged(alpha_max=args.alpha_max)
+            scheduler = StagedScheduler.make_staged(
+                alpha_terminal=args.alpha_terminal,
+                alpha_waypoint=args.alpha_terminal,
+                alpha_contact=args.alpha_contact,
+            )
 
         steerer = FlowSteerer(
             pipeline=pipeline,
@@ -483,9 +487,15 @@ def main():
                         choices=["foot_contact", "terminal"])
     parser.add_argument("--terminal_x",  type=float, default=2.0)
     parser.add_argument("--terminal_z",  type=float, default=0.0)
-    parser.add_argument("--alpha_max",   type=float, default=80.0)
+    parser.add_argument("--alpha_max",      type=float, default=80.0,
+                        help="Global alpha for cosine/constant schedulers")
+    parser.add_argument("--alpha_terminal", type=float, default=80.0,
+                        help="Alpha for terminal/waypoint constraints (staged scheduler)")
+    parser.add_argument("--alpha_contact",  type=float, default=15.0,
+                        help="Alpha for foot contact constraint (staged scheduler). "
+                             "Keep well below alpha_terminal; contact gradient is noisy.")
     parser.add_argument("--steps",       type=int,   default=50)
-    parser.add_argument("--scheduler",   default="cosine",
+    parser.add_argument("--scheduler",   default="staged",
                         choices=["constant", "cosine", "staged"])
     parser.add_argument("--seeds",       default="42",
                         help="Comma-separated seed list (one motion per seed). "

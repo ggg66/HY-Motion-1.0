@@ -212,18 +212,26 @@ class FootContactConstraint(BaseConstraint):
         """
         feet = joints[:, :, self.foot_joints, :]   # (B, T, 4, 3)
 
-        # --- Relative height above estimated floor ---
-        foot_y = feet[..., 1]                                        # (B, T, 4)  y-axis up
-        floor_y = foot_y.min(dim=1, keepdim=True).values             # (B, 1, 4)
-        rel_height = foot_y - floor_y                                # (B, T, 4)
+        # --- Contact mask: computed on detached joints so the gradient cannot
+        #     "cheat" by reclassifying frames as non-contact (e.g. lifting feet).
+        #     The mask is a fixed binary-ish indicator; only velocity and height
+        #     are differentiable. ---
+        with torch.no_grad():
+            foot_y_det = feet[..., 1].detach()                            # (B, T, 4)
+            floor_y_det = foot_y_det.min(dim=1, keepdim=True).values      # (B, 1, 4)
+            rel_h_det = foot_y_det - floor_y_det                          # (B, T, 4)
+            fvel_det = (feet[:, 1:] - feet[:, :-1]).detach().norm(dim=-1) # (B, T-1, 4)
+            h_mask = torch.sigmoid(-self.sharpness * (rel_h_det[:, :-1] - self.height_thresh))
+            v_mask = torch.sigmoid(-self.sharpness * (fvel_det - self.vel_thresh))
+            contact = h_mask * v_mask   # (B, T-1, 4)  [detached — no grad flows through mask]
 
-        # --- Per-frame foot velocity (L2 over xyz) ---
-        foot_vel = (feet[:, 1:] - feet[:, :-1]).norm(dim=-1)        # (B, T-1, 4)
-
-        # --- Soft contact mask: 1 when close to floor AND slow ---
-        h_mask = torch.sigmoid(-self.sharpness * (rel_height[:, :-1] - self.height_thresh))
-        v_mask = torch.sigmoid(-self.sharpness * (foot_vel - self.vel_thresh))
-        contact = h_mask * v_mask   # (B, T-1, 4)  in [0, 1]
+        # --- Differentiable velocity and height: gradient flows here only ---
+        foot_vel = (feet[:, 1:] - feet[:, :-1]).norm(dim=-1)   # (B, T-1, 4)
+        foot_y = feet[..., 1]                                    # (B, T, 4)
+        # Detach floor estimate: prevent gradient from "lowering the floor" to
+        # trivially satisfy rel_height ≈ 0.
+        floor_y = foot_y.min(dim=1, keepdim=True).values.detach()  # (B, 1, 4)
+        rel_height = foot_y - floor_y                               # (B, T, 4)
 
         # --- Velocity penalty at contact frames ---
         vel_loss = (contact * foot_vel).mean()
