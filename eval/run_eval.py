@@ -146,55 +146,40 @@ def load_pipeline(model_path: str, device: torch.device):
 # Per-prompt helpers
 # ---------------------------------------------------------------------------
 
-def build_constraint_schedulers(prompt_cfg: Dict, args) -> list:
+def build_timed_constraints(prompt_cfg: Dict, args) -> list:
     """
-    Build a list of (BaseConstraint, StagedScheduler) pairs for per-constraint
-    steering.  Each constraint gets an independent gradient and alpha schedule,
-    preventing a high-magnitude constraint from suppressing a low-magnitude one.
+    Build a list of (BaseConstraint, weight, t_start, t_end) tuples for the
+    time-staged composite path.
+
+    At each ODE step t, only constraints with t_start <= t <= t_end are included
+    in the composite loss.  A single StagedScheduler controls the overall alpha.
+    This preserves the FK-chain temporal smoothness of the composite gradient while
+    applying different constraints in the ODE phases where they are most effective:
+
+        terminal  →  early phase  [0.0, 0.6]  (global trajectory structure)
+        contact   →  late  phase  [0.6, 1.0]  (fine-grained physical detail)
     """
     constraint_types = prompt_cfg.get("constraint", args.constraint)
-    pairs = []
-
     has_contact  = "foot_contact" in constraint_types
     has_terminal = "terminal"     in constraint_types
+    timed = []
 
     if has_contact:
         fc = FootContactConstraint(height_thresh=0.05, vel_thresh=0.02)
-        if has_terminal:
-            # Phase separation: contact takes the LATE ODE phase so it does not
-            # interfere with terminal's global structure guidance.
-            t_contact_start = 0.6
-        else:
-            # Contact-only: activate early for more effective guidance steps.
-            # t=0.1 avoids the noisiest part of x̂_1 at t≈0.
-            t_contact_start = 0.1
-        sched = StagedScheduler(
-            alpha_max=args.alpha_contact,
-            mode="constant",
-            t_start=t_contact_start,
-            t_end=1.0,
-        )
-        pairs.append((fc, sched))
+        # Combined with terminal: take the late phase to avoid disrupting
+        # terminal's global convergence.  Contact-only: full window from t=0.
+        t_start = 0.6 if has_terminal else 0.0
+        timed.append((fc, 1.0, t_start, 1.0))
 
     if has_terminal:
         xz = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
         target = torch.tensor([[xz[0], 0.9, xz[1]]], dtype=torch.float32)
         tc = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
-        if has_contact:
-            # Phase separation: terminal takes the EARLY ODE phase.
-            t_terminal_end = 0.6
-        else:
-            t_terminal_end = 0.75
-        sched = StagedScheduler(
-            alpha_max=args.alpha_terminal,
-            mode="constant",
-            t_start=0.0,
-            t_end=t_terminal_end,
-        )
-        pairs.append((tc, sched))
+        t_end = 0.6 if has_contact else 0.75
+        timed.append((tc, 1.0, 0.0, t_end))
 
-    assert pairs, f"No constraints for prompt: {prompt_cfg['prompt']}"
-    return pairs
+    assert timed, f"No constraints for prompt: {prompt_cfg['prompt']}"
+    return timed
 
 
 def extract_terminal_targets(prompt_cfg: Dict, args) -> Optional[List]:
@@ -274,14 +259,19 @@ def run_eval(args):
         duration = prompt_cfg.get("duration", 3.0)
         print(f"\n[{global_idx}/{len(prompts)}] {prompt!r}  ({duration}s)")
 
-        # --- Build per-constraint (constraint, scheduler) pairs ---
-        constraint_schedulers = build_constraint_schedulers(prompt_cfg, args)
-        terminal_targets      = extract_terminal_targets(prompt_cfg, args)
+        # --- Build time-staged composite constraints ---
+        timed_constraints = build_timed_constraints(prompt_cfg, args)
+        terminal_targets  = extract_terminal_targets(prompt_cfg, args)
+
+        # Constant alpha schedule: one α controls magnitude for whichever
+        # constraint is active at each ODE step.
+        scheduler = StagedScheduler.constant(alpha_max=args.alpha_max)
 
         steerer = FlowSteerer(
             pipeline=pipeline,
             decoder=decoder,
-            constraint_schedulers=constraint_schedulers,
+            timed_constraints=timed_constraints,
+            scheduler=scheduler,
             steps=args.steps,
             smooth_kernel=args.smooth_kernel,
             verbose=args.verbose,
@@ -509,20 +499,13 @@ def main():
                         choices=["foot_contact", "terminal"])
     parser.add_argument("--terminal_x",  type=float, default=2.0)
     parser.add_argument("--terminal_z",  type=float, default=0.0)
-    parser.add_argument("--alpha_max",      type=float, default=80.0,
-                        help="Global alpha for cosine/constant schedulers")
-    parser.add_argument("--alpha_terminal", type=float, default=80.0,
-                        help="Alpha for terminal/waypoint constraints (staged scheduler)")
-    parser.add_argument("--alpha_contact",  type=float, default=80.0,
-                        help="Alpha for foot contact constraint.")
+    parser.add_argument("--alpha_max",    type=float, default=80.0,
+                        help="Steering strength α applied to whichever constraint is "
+                             "active at each ODE step.")
     parser.add_argument("--steps",        type=int,   default=50)
     parser.add_argument("--smooth_kernel", type=int,  default=5,
                         help="Temporal smoothing window for steering vector (odd int). "
                              "Suppresses high-frequency jerk. Set to 1 to disable.")
-    parser.add_argument("--scheduler",   default="staged",
-                        choices=["constant", "cosine", "staged"],
-                        help="Legacy arg retained for cosine/constant single-alpha runs. "
-                             "Per-constraint steering ignores this.")
     parser.add_argument("--seeds",       default="42",
                         help="Comma-separated seed list (one motion per seed). "
                              "For Phase-1 eval use: 42,43,44")

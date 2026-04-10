@@ -61,6 +61,7 @@ class FlowSteerer:
         constraints: Optional[Union[CompositeConstraint, BaseConstraint]] = None,
         scheduler: Optional[StagedScheduler] = None,
         constraint_schedulers: Optional[List[tuple]] = None,
+        timed_constraints: Optional[List[tuple]] = None,
         steps: Optional[int] = None,
         grad_clip: float = 1.0,
         smooth_kernel: int = 5,
@@ -68,11 +69,16 @@ class FlowSteerer:
     ):
         self.pipeline = pipeline
         self.decoder = decoder
-        # Per-constraint path (preferred): list of (BaseConstraint, StagedScheduler)
-        # Each constraint gets its own independent gradient and alpha schedule.
+        # -- Path 1 (recommended): time-staged composite.
+        # timed_constraints: list of (BaseConstraint, weight, t_start, t_end)
+        # At each ODE step t, only constraints with t_start <= t <= t_end enter the
+        # composite.  A single StagedScheduler controls the overall alpha magnitude.
+        # This preserves the FK-chain temporal smoothness of Stage 1 while allowing
+        # different constraints to act in different ODE phases.
+        self.timed_constraints = timed_constraints
+        # -- Path 2 (legacy, kept for ablation): per-constraint independent gradients.
         self.constraint_schedulers = constraint_schedulers
-        # Legacy composite path: single CompositeConstraint + single StagedScheduler.
-        # Used only when constraint_schedulers is None.
+        # -- Path 3 (legacy): static composite + single scheduler (Stage 1 style).
         self.constraints = constraints
         self.scheduler = scheduler or StagedScheduler.cosine(alpha_max=0.0)
         self.steps = steps or pipeline.validation_steps
@@ -195,8 +201,26 @@ class FlowSteerer:
             v = velocity_fn(t_cur, x)   # (B, T_max, 201)
 
             # Constraint steering
-            if self.constraint_schedulers is not None:
-                # Per-constraint path: independent gradient + alpha per constraint.
+            if self.timed_constraints is not None:
+                # Path 1: time-staged composite (recommended).
+                # Build a dynamic composite from constraints active at t_cur.
+                active_pairs = [
+                    (c, w) for c, w, t0, t1 in self.timed_constraints
+                    if t0 <= t_cur <= t1
+                ]
+                alpha = self.scheduler(t_cur)
+                if active_pairs and alpha > 0.0:
+                    composite = CompositeConstraint(active_pairs)
+                    steering, loss_val = self._compute_steering(
+                        x, v, t_cur, length, constraints_override=composite
+                    )
+                    v = v + alpha * steering
+                    if self.verbose:
+                        names = [type(c).__name__ for c, _ in active_pairs]
+                        print(f"  step {i:3d} | t={t_cur:.3f} | α={alpha:.1f} "
+                              f"| loss={loss_val:.5f} | {names}")
+            elif self.constraint_schedulers is not None:
+                # Path 2: per-constraint independent gradients (ablation only).
                 active = [(c, s) for c, s in self.constraint_schedulers if s(t_cur) > 0.0]
                 if active:
                     steering, loss_val = self._compute_steering_per_constraint(
@@ -206,7 +230,7 @@ class FlowSteerer:
                     if self.verbose:
                         print(f"  step {i:3d} | t={t_cur:.3f} | loss={loss_val:.5f}")
             elif self.constraints is not None:
-                # Legacy composite path.
+                # Path 3: static composite (Stage 1 style).
                 alpha = self.scheduler(t_cur)
                 if alpha > 0.0:
                     steering, loss_val = self._compute_steering(x, v, t_cur, length)
@@ -231,11 +255,18 @@ class FlowSteerer:
         v: Tensor,           # (B, T_max, 201) frozen velocity (detached)
         t: float,
         length: int,
+        constraints_override: Optional[CompositeConstraint] = None,
     ) -> tuple[Tensor, float]:
         """
         Returns (steering, loss_value).
         steering: (B, T_max, 201) – same shape as v, L2-normalised per sample
+
+        constraints_override: if provided, use this composite instead of
+            self.constraints (used by the timed-composite path).
         """
+        constraints = constraints_override if constraints_override is not None \
+            else self.constraints
+
         x_req = x.detach().requires_grad_(True)
 
         # One-step estimate of clean motion (t=1 is data; t=0 is noise)
@@ -247,7 +278,7 @@ class FlowSteerer:
         joints = self.decoder(latent_crop)           # (B, L, 22, 3)
 
         # Constraint loss
-        loss = self.constraints(joints)              # scalar
+        loss = constraints(joints)                   # scalar
         loss_val = loss.item()
 
         # Gradient w.r.t. x_req (flows through x_req → x1_hat → joints → loss)
@@ -350,6 +381,7 @@ class FlowSteerer:
         body_model_path: str = "scripts/gradio/static/assets/dump_wooden",
         constraints: Optional[CompositeConstraint] = None,
         scheduler: Optional[StagedScheduler] = None,
+        timed_constraints: Optional[List[tuple]] = None,
         constraint_schedulers: Optional[List[tuple]] = None,
         steps: int = 50,
         grad_clip: float = 1.0,
@@ -365,6 +397,7 @@ class FlowSteerer:
             decoder=decoder,
             constraints=constraints,
             scheduler=scheduler,
+            timed_constraints=timed_constraints,
             constraint_schedulers=constraint_schedulers,
             steps=steps,
             grad_clip=grad_clip,
