@@ -155,32 +155,41 @@ def build_constraint_schedulers(prompt_cfg: Dict, args) -> list:
     constraint_types = prompt_cfg.get("constraint", args.constraint)
     pairs = []
 
-    if "foot_contact" in constraint_types:
+    has_contact  = "foot_contact" in constraint_types
+    has_terminal = "terminal"     in constraint_types
+
+    if has_contact:
         fc = FootContactConstraint(height_thresh=0.05, vel_thresh=0.02)
-        # Contact steers fine-grained physical detail.  Activate from t=0.2 so
-        # the x̂_1 estimate is stable enough, ramp up over 15% of the window to
-        # avoid a sudden velocity shock, then hold at full alpha.
+        if has_terminal:
+            # Phase separation: contact takes the LATE ODE phase so it does not
+            # interfere with terminal's global structure guidance.
+            t_contact_start = 0.6
+        else:
+            # Contact-only: activate early for more effective guidance steps.
+            # t=0.1 avoids the noisiest part of x̂_1 at t≈0.
+            t_contact_start = 0.1
         sched = StagedScheduler(
             alpha_max=args.alpha_contact,
-            mode="linear_ramp",
-            t_start=0.2,
+            mode="constant",
+            t_start=t_contact_start,
             t_end=1.0,
-            warmup_frac=0.15,
         )
         pairs.append((fc, sched))
 
-    if "terminal" in constraint_types:
+    if has_terminal:
         xz = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
         target = torch.tensor([[xz[0], 0.9, xz[1]]], dtype=torch.float32)
         tc = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
-        # Terminal steers global structure — must be strong from the very first
-        # ODE step when the trajectory skeleton is being set.  Use constant mode
-        # (no warmup) so the full alpha is active immediately.
+        if has_contact:
+            # Phase separation: terminal takes the EARLY ODE phase.
+            t_terminal_end = 0.6
+        else:
+            t_terminal_end = 0.75
         sched = StagedScheduler(
             alpha_max=args.alpha_terminal,
             mode="constant",
             t_start=0.0,
-            t_end=0.75,
+            t_end=t_terminal_end,
         )
         pairs.append((tc, sched))
 
