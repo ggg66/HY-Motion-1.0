@@ -170,7 +170,7 @@ def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
         constraint_list.append((tc, 1.5))
 
     assert constraint_list, f"No constraints for prompt: {prompt_cfg['prompt']}"
-    return CompositeConstraint(constraint_list)
+    return CompositeConstraint(constraint_list, normalize_losses=args.normalize_losses)
 
 
 def extract_terminal_targets(prompt_cfg: Dict, args) -> Optional[List]:
@@ -505,6 +505,10 @@ def main():
     parser.add_argument("--no_detach_mask", action="store_true",
                         help="[Ablation] Disable contact mask detach — lets gradient "
                              "reclassify frames as non-contact (original buggy behavior).")
+    parser.add_argument("--normalize_losses", action="store_true",
+                        help="Normalize each constraint loss by its detached value before "
+                             "combining, equalising gradient magnitudes across constraints. "
+                             "Fixes foot+terminal imbalance without breaking FK-chain coupling.")
     parser.add_argument("--alpha_terminal", type=float, default=80.0,
                         help="Peak steering strength for terminal/waypoint constraints "
                              "(StagedScheduler stages [0,0.7] and [0.2,0.9]).")

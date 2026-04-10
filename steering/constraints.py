@@ -52,21 +52,41 @@ class CompositeConstraint(BaseConstraint):
     """
     Weighted sum of multiple constraints.
 
+    Args:
+        constraints:       list of (constraint, weight) pairs
+        normalize_losses:  if True, divide each constraint's loss by its
+                           detached value before combining, so every term
+                           contributes ~1.0 regardless of absolute scale.
+                           Fixes gradient-magnitude imbalance when mixing
+                           constraints with very different loss magnitudes
+                           (e.g. TerminalConstraint ~4 m² vs FootContact ~0.02).
+                           A single backward pass is still used, preserving
+                           FK-chain temporal coupling (unlike per-gradient
+                           normalisation which causes jerk artefacts).
+
     Usage:
         composite = CompositeConstraint([
             (TerminalConstraint(...), 1.0),
-            (FootContactConstraint(), 0.5),
-        ])
+            (FootContactConstraint(), 1.0),
+        ], normalize_losses=True)
         loss = composite.loss(joints)
     """
 
-    def __init__(self, constraints: List[Tuple[BaseConstraint, float]]):
-        self.constraints = constraints   # list of (constraint, weight)
+    def __init__(
+        self,
+        constraints: List[Tuple[BaseConstraint, float]],
+        normalize_losses: bool = False,
+    ):
+        self.constraints = constraints        # list of (constraint, weight)
+        self.normalize_losses = normalize_losses
 
     def loss(self, joints: Tensor) -> Tensor:
         total = joints.new_zeros(())
         for constraint, w in self.constraints:
-            total = total + w * constraint.loss(joints)
+            l = constraint.loss(joints)
+            if self.normalize_losses:
+                l = l / (l.detach() + 1e-8)
+            total = total + w * l
         return total
 
     def __call__(self, joints: Tensor) -> Tensor:
