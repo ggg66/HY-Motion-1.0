@@ -157,14 +157,15 @@ def build_constraint_schedulers(prompt_cfg: Dict, args) -> list:
 
     if "foot_contact" in constraint_types:
         fc = FootContactConstraint(height_thresh=0.05, vel_thresh=0.02)
-        # Contact is most effective in the late ODE phase (fine detail forming).
-        # Linear ramp avoids a sudden jerk at the start of the active window.
+        # Contact steers fine-grained physical detail.  Activate from t=0.2 so
+        # the x̂_1 estimate is stable enough, ramp up over 15% of the window to
+        # avoid a sudden velocity shock, then hold at full alpha.
         sched = StagedScheduler(
             alpha_max=args.alpha_contact,
             mode="linear_ramp",
-            t_start=0.4,
+            t_start=0.2,
             t_end=1.0,
-            warmup_frac=0.2,
+            warmup_frac=0.15,
         )
         pairs.append((fc, sched))
 
@@ -172,13 +173,14 @@ def build_constraint_schedulers(prompt_cfg: Dict, args) -> list:
         xz = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
         target = torch.tensor([[xz[0], 0.9, xz[1]]], dtype=torch.float32)
         tc = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
-        # Terminal is most effective in the early-to-mid ODE phase (global structure).
+        # Terminal steers global structure — must be strong from the very first
+        # ODE step when the trajectory skeleton is being set.  Use constant mode
+        # (no warmup) so the full alpha is active immediately.
         sched = StagedScheduler(
             alpha_max=args.alpha_terminal,
-            mode="linear_ramp",
+            mode="constant",
             t_start=0.0,
-            t_end=0.8,
-            warmup_frac=0.1,
+            t_end=0.75,
         )
         pairs.append((tc, sched))
 
@@ -502,9 +504,8 @@ def main():
                         help="Global alpha for cosine/constant schedulers")
     parser.add_argument("--alpha_terminal", type=float, default=80.0,
                         help="Alpha for terminal/waypoint constraints (staged scheduler)")
-    parser.add_argument("--alpha_contact",  type=float, default=15.0,
-                        help="Alpha for foot contact constraint (staged scheduler). "
-                             "Keep well below alpha_terminal; contact gradient is noisy.")
+    parser.add_argument("--alpha_contact",  type=float, default=80.0,
+                        help="Alpha for foot contact constraint.")
     parser.add_argument("--steps",        type=int,   default=50)
     parser.add_argument("--smooth_kernel", type=int,  default=5,
                         help="Temporal smoothing window for steering vector (odd int). "
