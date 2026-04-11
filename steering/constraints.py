@@ -306,3 +306,259 @@ class RootTrajectoryConstraint(BaseConstraint):
         sampled = root_xz[:, indices, :]             # (B, N, 2)
 
         return F.mse_loss(sampled, waypoints.unsqueeze(0).expand_as(sampled))
+
+
+# ---------------------------------------------------------------------------
+# WaypointConstraint  (L_waypoint)
+# ---------------------------------------------------------------------------
+
+class WaypointConstraint(BaseConstraint):
+    """
+    Multi-waypoint root trajectory constraint with temporal soft windows.
+
+    Constrains the root joint (pelvis) XZ position to pass through a sequence
+    of target positions at specified normalised times.  Only horizontal (XZ)
+    position is constrained; height (Y) remains free.
+
+    Complements PoseConstraint (body configuration) and
+    FootContactConstraint (physical stability): spatial path is this
+    constraint's sole responsibility.
+
+    Args:
+        waypoints:   list of (t_norm, target) pairs where
+                     t_norm  ∈ [0, 1]  is normalised sequence time and
+                     target  is a (2,) [XZ] or (3,) [XYZ, Y ignored] tensor.
+        weight:      overall loss weight.
+        sigma_frac:  temporal Gaussian σ as a fraction of sequence length.
+                     Smaller → tighter time pinning.  Default 0.05 ≈ 5 %.
+    """
+
+    def __init__(
+        self,
+        waypoints: List[Tuple[float, Tensor]],
+        weight: float = 1.0,
+        sigma_frac: float = 0.05,
+    ):
+        self.waypoints   = [(float(t), w.float()) for t, w in waypoints]
+        self.weight      = weight
+        self.sigma_frac  = sigma_frac
+
+    def loss(self, joints: Tensor) -> Tensor:
+        B, T, _, _ = joints.shape
+        device = joints.device
+        root_xz = joints[:, :, ROOT_JOINT, [0, 2]]      # (B, T, 2)
+
+        sigma = max(1.0, self.sigma_frac * T)
+        t_idx = torch.arange(T, device=device, dtype=torch.float32)
+        total = joints.new_zeros(())
+
+        for t_norm, target in self.waypoints:
+            t_frame = float(t_norm) * (T - 1)
+            # Temporal Gaussian window, normalised to sum = 1
+            w = torch.exp(-0.5 * ((t_idx - t_frame) / sigma) ** 2)
+            w = w / w.sum()                              # (T,)
+
+            tgt = target.to(device)
+            if tgt.shape[-1] == 3:
+                tgt = tgt[[0, 2]]                        # extract XZ from XYZ
+
+            # Weighted MSE over time
+            diff     = (root_xz - tgt.view(1, 1, 2)) ** 2   # (B, T, 2)
+            weighted = (w.view(1, T, 1) * diff).sum() / B
+            total    = total + weighted
+
+        return total
+
+
+# ---------------------------------------------------------------------------
+# PoseConstraint  (L_pose)
+# ---------------------------------------------------------------------------
+
+# Hip indices used for yaw-canonicalization (SMPL-H 22-joint layout)
+_LEFT_HIP  = 1
+_RIGHT_HIP = 2
+
+# Convenience body-part masks (subset of 0-21 joint indices)
+UPPER_BODY_JOINTS = [3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+LOWER_BODY_JOINTS = [1, 2, 4, 5, 7, 8, 10, 11]
+ARM_JOINTS        = [16, 17, 18, 19, 20, 21]
+LEG_JOINTS        = [1, 2, 4, 5, 7, 8, 10, 11]
+
+
+class PoseConstraint(BaseConstraint):
+    """
+    Sparse keyframe pose constraint in canonical (root-aligned) space.
+
+    Constrains body *configuration* — joint positions relative to the pelvis
+    with global yaw removed — at one or more keyframes, without coupling to
+    absolute world position (handled by Terminal/WaypointConstraint) or foot
+    physics (handled by FootContactConstraint).
+
+    Canonical space definition
+    --------------------------
+    Given world-space joints at frame t:
+      1. Root-centred:  subtract pelvis (joint 0) position.
+      2. Yaw-aligned:   rotate around Y-axis so the character faces +Z.
+         Facing direction is derived from the left→right hip vector.
+      3. Height (Y) is preserved.
+
+    The canonicalization transform is computed from **detached** joints, so
+    the gradient cannot shift the reference frame during optimisation — the
+    same principle as FootContactConstraint's detached contact mask.
+
+    Args:
+        keyframes:      list of (t_norm, target_joints) where
+                        t_norm         ∈ [0, 1] normalised sequence time,
+                        target_joints  (22, 3) canonical-space joint positions.
+                        Targets should themselves be canonicalized (pelvis
+                        at origin, facing +Z).
+        joint_mask:     list of joint indices to constrain.  None = all 22.
+                        Use UPPER_BODY_JOINTS, ARM_JOINTS, etc. for partial
+                        body control.
+        sigma_frac:     temporal Gaussian σ as fraction of sequence length.
+                        Larger → softer time pinning.  Default 0.04.
+        facing_weight:  if > 0, add a cosine yaw-alignment term so the
+                        character also faces the target direction in world
+                        space (rather than only matching body shape).
+        weight:         overall loss weight.
+        mode:           "canonical" (default) — root-centred + yaw-aligned.
+                        "world" — raw world-space, for ablation only; target
+                        must be in world coordinates.
+    """
+
+    def __init__(
+        self,
+        keyframes: List[Tuple[float, Tensor]],
+        joint_mask: Optional[List[int]] = None,
+        sigma_frac: float = 0.04,
+        facing_weight: float = 0.0,
+        weight: float = 1.0,
+        mode: str = "canonical",
+    ):
+        assert mode in ("canonical", "world"), f"Unknown PoseConstraint mode: {mode!r}"
+        self.keyframes      = [(float(t), kf.float()) for t, kf in keyframes]
+        self.joint_mask     = joint_mask
+        self.sigma_frac     = sigma_frac
+        self.facing_weight  = facing_weight
+        self.weight         = weight
+        self.mode           = mode
+
+    # ------------------------------------------------------------------
+    # Canonicalization helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def canonicalize(joints: Tensor) -> Tensor:
+        """
+        Map a joint sequence to root-centred + yaw-aligned canonical space.
+
+        The yaw transform is computed from DETACHED joints (gradient cannot
+        escape through the reference frame).
+
+        joints:  (B, T, 22, 3)  world-space joint positions
+        returns: (B, T, 22, 3)  canonical-space joint positions
+        """
+        with torch.no_grad():
+            # Pelvis position (detached reference frame origin)
+            root_det = joints[:, :, ROOT_JOINT, :].detach()          # (B, T, 3)
+
+            # Hip vector → facing direction in XZ plane (detached)
+            hip_vec = (
+                joints[:, :, _RIGHT_HIP, :] - joints[:, :, _LEFT_HIP, :]
+            ).detach()                                                 # (B, T, 3)
+            hx, hz  = hip_vec[..., 0], hip_vec[..., 2]               # (B, T)
+            norm    = (hx ** 2 + hz ** 2).sqrt().clamp(min=1e-6)
+            # Forward direction perpendicular to hip in XZ: (-hz, hx)/norm
+            fx, fz  = -hz / norm, hx / norm
+            # Yaw angle: rotate so forward → +Z
+            yaw     = torch.atan2(fx, fz)                             # (B, T)
+            cos_y   = yaw.cos().unsqueeze(-1)                         # (B, T, 1)
+            sin_y   = yaw.sin().unsqueeze(-1)                         # (B, T, 1)
+
+        # Centre around root (differentiable)
+        centred = joints - root_det.unsqueeze(2)                      # (B, T, 22, 3)
+        x = centred[..., 0]   # (B, T, 22)
+        y = centred[..., 1]
+        z = centred[..., 2]
+
+        # Rotate around Y-axis by +yaw:  x′ = x·cos − z·sin
+        #                                 z′ = x·sin + z·cos
+        x_rot = x * cos_y - z * sin_y
+        z_rot = x * sin_y + z * cos_y
+        return torch.stack([x_rot, y, z_rot], dim=-1)                 # (B, T, 22, 3)
+
+    @staticmethod
+    def _facing_loss(joints: Tensor, target_kf: Tensor) -> Tensor:
+        """
+        Cosine yaw-alignment loss: 1 − cos(Δyaw) ∈ [0, 2].
+
+        joints:    (B, T, 22, 3)  world-space
+        target_kf: (22, 3)        canonical-space target (used only for hip direction)
+        """
+        # Target facing yaw from canonical hip vector
+        t_hip   = target_kf[_RIGHT_HIP] - target_kf[_LEFT_HIP]
+        t_hx, t_hz = t_hip[0], t_hip[2]
+        t_norm  = (t_hx ** 2 + t_hz ** 2).sqrt().clamp(min=1e-6)
+        # In canonical space the character faces +Z, so target yaw = 0
+        # (forward = +Z means fx=0, fz=1 → atan2(0,1)=0).
+        # The target_yaw is implicitly 0; no need to compute from target_kf.
+        target_yaw = joints.new_zeros(())
+
+        hip_vec = (
+            joints[:, :, _RIGHT_HIP, :] - joints[:, :, _LEFT_HIP, :]
+        )                                                              # (B, T, 3)
+        hx, hz   = hip_vec[..., 0], hip_vec[..., 2]
+        norm     = (hx ** 2 + hz ** 2).sqrt().clamp(min=1e-6)
+        fx, fz   = -hz / norm, hx / norm
+        gen_yaw  = torch.atan2(fx, fz)                                # (B, T)
+        delta    = gen_yaw - target_yaw
+        return (1.0 - delta.cos()).mean(dim=0)                        # (T,)
+
+    # ------------------------------------------------------------------
+    # Loss
+    # ------------------------------------------------------------------
+
+    def loss(self, joints: Tensor) -> Tensor:
+        """
+        joints: (B, T, 22, 3)
+        """
+        B, T, _, _ = joints.shape
+        device     = joints.device
+        sigma      = max(1.0, self.sigma_frac * T)
+        t_idx      = torch.arange(T, device=device, dtype=torch.float32)
+
+        # Canonicalize full sequence once (efficient: no per-frame loop)
+        if self.mode == "canonical":
+            pose_seq = self.canonicalize(joints)                      # (B, T, 22, 3)
+        else:
+            pose_seq = joints
+
+        total = joints.new_zeros(())
+
+        for t_norm, target_kf in self.keyframes:
+            t_frame = float(t_norm) * (T - 1)
+            # Temporal Gaussian weights (normalised)
+            w = torch.exp(-0.5 * ((t_idx - t_frame) / sigma) ** 2)
+            w = w / w.sum()                                            # (T,)
+
+            target = target_kf.to(device)                             # (22, 3)
+
+            # Apply joint mask
+            if self.joint_mask is not None:
+                pose_m   = pose_seq[:, :, self.joint_mask, :]         # (B, T, J, 3)
+                target_m = target[self.joint_mask, :]                  # (J, 3)
+            else:
+                pose_m   = pose_seq                                    # (B, T, 22, 3)
+                target_m = target                                      # (22, 3)
+
+            # Weighted pose MSE over time
+            diff       = (pose_m - target_m[None, None]) ** 2        # (B, T, J, 3)
+            frame_loss = diff.mean(dim=(-2, -1))                      # (B, T)
+            total      = total + (w * frame_loss).sum(dim=1).mean()   # scalar
+
+            # Optional yaw-alignment term
+            if self.facing_weight > 0.0 and self.mode == "canonical":
+                face_loss = self._facing_loss(joints, target_kf.to(device))  # (T,)
+                total     = total + self.facing_weight * (w * face_loss).sum()
+
+        return total
