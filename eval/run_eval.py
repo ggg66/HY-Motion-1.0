@@ -64,18 +64,27 @@ import numpy as np
 import torch
 import yaml
 
+# numpy is used for loading pose target files (.npy) — ensure it is imported
+# before any constraint-building code.
+
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _repo_root not in sys.path:
     sys.path.insert(0, _repo_root)
 
 from hymotion.utils.loaders import load_object
 from steering import (
+    ARM_JOINTS,
     CompositeConstraint,
     FlowSteerer,
     FootContactConstraint,
+    LEG_JOINTS,
+    LOWER_BODY_JOINTS,
     MotionDecoder,
+    PoseConstraint,
     StagedScheduler,
     TerminalConstraint,
+    UPPER_BODY_JOINTS,
+    WaypointConstraint,
 )
 from eval.metrics import (
     compute_constraint_metrics,
@@ -145,16 +154,27 @@ def load_pipeline(model_path: str, device: torch.device):
 # Per-prompt helpers
 # ---------------------------------------------------------------------------
 
+_JOINT_MASK_MAP: Dict[str, Optional[List[int]]] = {
+    "all":        None,
+    "upper_body": UPPER_BODY_JOINTS,
+    "lower_body": LOWER_BODY_JOINTS,
+    "arms":       ARM_JOINTS,
+    "legs":       LEG_JOINTS,
+}
+
+
 def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
     """
     Build a static CompositeConstraint for the given prompt.
 
-    Stage 1 configuration (best results):
-        foot_contact  → weight 1.0  (full sequence, α=15 via StagedScheduler)
-        terminal      → weight 1.5  (full sequence, α=80 via StagedScheduler)
+    Supported constraint types (set via prompt JSON "constraint" field):
+        foot_contact  weight 1.0  — physical foot stability
+        terminal      weight 1.5  — root XZ terminal position
+        waypoint      weight 1.0  — multi-point root XZ path
+        pose          weight 1.0  — canonical keyframe body configuration
     """
     constraint_types = prompt_cfg.get("constraint", args.constraint)
-    constraint_list = []
+    constraint_list  = []
 
     if "foot_contact" in constraint_types:
         fc = FootContactConstraint(
@@ -164,10 +184,31 @@ def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
         constraint_list.append((fc, 1.0))
 
     if "terminal" in constraint_types:
-        xz = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
+        xz     = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
         target = torch.tensor([[xz[0], 0.9, xz[1]]], dtype=torch.float32)
-        tc = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
+        tc     = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
         constraint_list.append((tc, 1.5))
+
+    if "waypoint" in constraint_types:
+        raw_wps = prompt_cfg.get("waypoints", [])
+        wps = [(float(w["t_norm"]),
+                torch.tensor(w["xz"], dtype=torch.float32))
+               for w in raw_wps]
+        wc = WaypointConstraint(wps, sigma_frac=0.05)
+        constraint_list.append((wc, 1.0))
+
+    if "pose" in constraint_types:
+        raw_kfs = prompt_cfg.get("pose_keyframes", [])
+        keyframes = []
+        for kf in raw_kfs:
+            target_np = np.load(kf["target_file"])             # (22, 3)
+            target    = torch.from_numpy(target_np).float()
+            keyframes.append((float(kf["t_norm"]), target))
+        mask_key   = raw_kfs[0].get("joint_mask", "upper_body") if raw_kfs else "upper_body"
+        joint_mask = _JOINT_MASK_MAP.get(mask_key, None)
+        sigma_frac = raw_kfs[0].get("sigma_frac", 0.04) if raw_kfs else 0.04
+        pc = PoseConstraint(keyframes, joint_mask=joint_mask, sigma_frac=sigma_frac)
+        constraint_list.append((pc, 1.0))
 
     assert constraint_list, f"No constraints for prompt: {prompt_cfg['prompt']}"
     return CompositeConstraint(constraint_list, normalize_losses=args.normalize_losses)
@@ -496,7 +537,7 @@ def main():
                              "Omit to use built-in 5-prompt sanity check.")
     parser.add_argument("--output_dir",   default="output/eval")
     parser.add_argument("--constraint",   nargs="+", default=["foot_contact"],
-                        choices=["foot_contact", "terminal"])
+                        choices=["foot_contact", "terminal", "waypoint", "pose"])
     parser.add_argument("--terminal_x",  type=float, default=2.0)
     parser.add_argument("--terminal_z",  type=float, default=0.0)
     parser.add_argument("--scheduler",      default="staged",
