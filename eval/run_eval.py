@@ -222,6 +222,30 @@ def extract_terminal_targets(prompt_cfg: Dict, args) -> Optional[List]:
     return [([0], target_np)]
 
 
+def extract_pose_targets_for_metrics(prompt_cfg: Dict, args) -> Optional[List]:
+    """
+    Extract pose targets from prompt config for use in compute_constraint_metrics.
+
+    Returns:
+        List of (t_norm, target_pose (22,3) np.ndarray, joint_mask list or None)
+        or None if no pose constraint.
+    """
+    constraint_types = prompt_cfg.get("constraint", args.constraint)
+    if "pose" not in constraint_types:
+        return None
+    raw_kfs = prompt_cfg.get("pose_keyframes", [])
+    if not raw_kfs:
+        return None
+    result = []
+    for kf in raw_kfs:
+        target_np  = np.load(kf["target_file"])                        # (22, 3)
+        t_norm     = float(kf["t_norm"])
+        mask_key   = kf.get("joint_mask", "upper_body")
+        joint_mask = _JOINT_MASK_MAP.get(mask_key, None)
+        result.append((t_norm, target_np, joint_mask))
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Resume helpers
 # ---------------------------------------------------------------------------
@@ -292,10 +316,15 @@ def run_eval(args):
         print(f"\n[{global_idx}/{len(prompts)}] {prompt!r}  ({duration}s)")
 
         # --- Build constraints and scheduler (Stage 1 config) ---
+        constraint_types = prompt_cfg.get("constraint", args.constraint)
         constraints      = build_constraints_for_prompt(prompt_cfg, args)
         terminal_targets = extract_terminal_targets(prompt_cfg, args)
 
-        if args.scheduler == "staged":
+        # Pose-only prompts need a much lower alpha (pose gradient ~13x larger
+        # than terminal because it spans 13 joints vs 1).
+        if set(constraint_types) == {"pose"}:
+            scheduler = StagedScheduler.constant(alpha_max=args.alpha_pose)
+        elif args.scheduler == "staged":
             scheduler = StagedScheduler.make_staged(
                 alpha_terminal=args.alpha_terminal,
                 alpha_waypoint=args.alpha_terminal,
@@ -344,8 +373,9 @@ def run_eval(args):
         print(f"  Steered:   {t_steer:.1f}s")
 
         # ---- Metrics ----
-        b_c = compute_constraint_metrics(baseline_joints, terminal_targets=terminal_targets)
-        s_c = compute_constraint_metrics(steered_joints,  terminal_targets=terminal_targets)
+        pose_targets = extract_pose_targets_for_metrics(prompt_cfg, args)
+        b_c = compute_constraint_metrics(baseline_joints, terminal_targets=terminal_targets, pose_targets=pose_targets)
+        s_c = compute_constraint_metrics(steered_joints,  terminal_targets=terminal_targets, pose_targets=pose_targets)
         b_q = compute_quality_metrics(baseline_joints)
         s_q = compute_quality_metrics(steered_joints)
 
@@ -557,6 +587,10 @@ def main():
                         help="Steering strength for foot-contact constraint "
                              "(StagedScheduler stage [0.5,1.0]). "
                              "Keep lower than alpha_terminal to avoid jerk.")
+    parser.add_argument("--alpha_pose",    type=float, default=8.0,
+                        help="Steering strength for pose-only constraint. "
+                             "Much smaller than alpha_terminal because pose gradient "
+                             "is distributed across ~13 joints (vs 1 for terminal).")
     parser.add_argument("--steps",        type=int,   default=50)
     parser.add_argument("--smooth_kernel", type=int,  default=5,
                         help="Temporal smoothing window for steering vector (odd int). "

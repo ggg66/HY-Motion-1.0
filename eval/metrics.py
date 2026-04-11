@@ -26,6 +26,7 @@ Two metric families:
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field, asdict
 from typing import Dict, List, Optional, Tuple
 
@@ -43,6 +44,11 @@ ANKLE_JOINTS  = [7, 8]
 TOE_JOINTS    = [10, 11]
 ROOT_JOINT    = 0                 # Pelvis
 
+# Pose canonicalization constants (mirrors PoseConstraint)
+_POSE_ROOT      = 0
+_POSE_LEFT_HIP  = 1
+_POSE_RIGHT_HIP = 2
+
 # Contact detection defaults (shared with FootContactConstraint)
 DEFAULT_HEIGHT_THRESH = 0.05     # metres above estimated floor
 DEFAULT_VEL_THRESH    = 0.02     # metres per frame
@@ -51,6 +57,32 @@ DEFAULT_VEL_THRESH    = 0.02     # metres per frame
 # ---------------------------------------------------------------------------
 # Low-level helpers
 # ---------------------------------------------------------------------------
+
+def _canonicalize_frame_np(joints_frame: np.ndarray) -> np.ndarray:
+    """
+    Root-centred + yaw-aligned canonicalization in numpy.
+
+    Mirrors PoseConstraint.canonicalize() so metric space matches constraint space.
+
+    Args:
+        joints_frame: (22, 3) world-space joint positions
+
+    Returns:
+        (22, 3) canonical-space joint positions
+    """
+    root    = joints_frame[_POSE_ROOT]
+    centred = joints_frame - root
+    hip_vec = joints_frame[_POSE_RIGHT_HIP] - joints_frame[_POSE_LEFT_HIP]
+    hx, hz  = hip_vec[0], hip_vec[2]
+    norm    = math.sqrt(hx**2 + hz**2) + 1e-6
+    fx, fz  = -hz / norm, hx / norm
+    yaw     = math.atan2(fx, fz)
+    cos_y   = math.cos(yaw)
+    sin_y   = math.sin(yaw)
+    x, y, z = centred[:, 0], centred[:, 1], centred[:, 2]
+    x_rot   = x * cos_y - z * sin_y
+    z_rot   = x * sin_y + z * cos_y
+    return np.stack([x_rot, y, z_rot], axis=-1)  # (22, 3)
 
 def _soft_contact_mask(
     joints_np: np.ndarray,
@@ -119,9 +151,10 @@ class ConstraintMetrics:
     contact_violation_rate: float = 0.0    # fraction of contact frames where foot is airborne
     floor_penetration_depth: float = 0.0  # mean negative height at contact frames (m)
 
-    # Terminal / waypoint (NaN when not applicable)
+    # Terminal / waypoint / pose (NaN when not applicable)
     terminal_position_error: float = float("nan")
     waypoint_mae: float = float("nan")
+    pose_hit_error: float = float("nan")   # mean L2 in canonical pose space at keyframe(s)
 
     def to_dict(self) -> Dict[str, float]:
         return asdict(self)
@@ -170,6 +203,7 @@ def compute_constraint_metrics(
     joints_batch: np.ndarray,
     terminal_targets: Optional[List[Tuple[List[int], np.ndarray]]] = None,
     waypoints: Optional[List[List[Tuple[int, int, np.ndarray]]]] = None,
+    pose_targets: Optional[List[Tuple[float, np.ndarray, Optional[List[int]]]]] = None,
     height_thresh: float = DEFAULT_HEIGHT_THRESH,
     vel_thresh: float = DEFAULT_VEL_THRESH,
 ) -> ConstraintMetrics:
@@ -182,6 +216,8 @@ def compute_constraint_metrics(
                           or None if no terminal constraint was applied
         waypoints: per-sample list of (frame_idx, joint_idx, target_xyz (3,))
                    or None
+        pose_targets: list of (t_norm, target_pose (22,3), joint_mask) tuples
+                      shared across the batch; or None
         height_thresh, vel_thresh: contact detection thresholds (match training)
 
     Returns:
@@ -254,6 +290,24 @@ def compute_constraint_metrics(
                 all_errs.append(np.linalg.norm(pred - tgt))
         if all_errs:
             metrics.waypoint_mae = float(np.mean(all_errs))
+
+    # ---- Pose hit error ----
+    if pose_targets is not None:
+        all_errs = []
+        for b in range(B):
+            for (t_norm, target_pose, joint_mask) in pose_targets:
+                frame = int(round(t_norm * (T - 1)))
+                frame = max(0, min(frame, T - 1))
+                canonical = _canonicalize_frame_np(joints_batch[b, frame])  # (22, 3)
+                if joint_mask is not None:
+                    canonical    = canonical[joint_mask]
+                    target_sel   = target_pose[joint_mask]
+                else:
+                    target_sel   = target_pose
+                err = np.linalg.norm(canonical - target_sel, axis=-1).mean()
+                all_errs.append(err)
+        if all_errs:
+            metrics.pose_hit_error = float(np.mean(all_errs))
 
     return metrics
 
