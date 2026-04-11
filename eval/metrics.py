@@ -58,7 +58,7 @@ DEFAULT_VEL_THRESH    = 0.02     # metres per frame
 # Low-level helpers
 # ---------------------------------------------------------------------------
 
-def _canonicalize_frame_np(joints_frame: np.ndarray) -> np.ndarray:
+def canonicalize_frame_np(joints_frame: np.ndarray) -> np.ndarray:
     """
     Root-centred + yaw-aligned canonicalization in numpy.
 
@@ -298,7 +298,7 @@ def compute_constraint_metrics(
             for (t_norm, target_pose, joint_mask) in pose_targets:
                 frame = int(round(t_norm * (T - 1)))
                 frame = max(0, min(frame, T - 1))
-                canonical = _canonicalize_frame_np(joints_batch[b, frame])  # (22, 3)
+                canonical = canonicalize_frame_np(joints_batch[b, frame])  # (22, 3)
                 if joint_mask is not None:
                     canonical    = canonical[joint_mask]
                     target_sel   = target_pose[joint_mask]

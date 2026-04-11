@@ -3,120 +3,140 @@
     "idx": 1,
     "prompt": "a person walks forward and stops",
     "duration": 3.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "upper_body"}]
   },
   {
     "idx": 2,
     "prompt": "a person walks forward.",
     "duration": 4.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "upper_body"}]
   },
   {
     "idx": 11,
     "prompt": "a person runs forward.",
     "duration": 4.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.4, "joint_mask": "upper_body"}]
   },
   {
     "idx": 14,
     "prompt": "a person sprints forward.",
     "duration": 4.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "arms"}]
   },
   {
     "idx": 31,
     "prompt": "a person dances.",
     "duration": 4.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.3, "joint_mask": "upper_body"}]
   },
   {
     "idx": 33,
     "prompt": "a person dances jazz, jumping rhythmically.",
     "duration": 5.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "upper_body"}]
   },
   {
     "idx": 35,
     "prompt": "a person does a hip-hop dance.",
     "duration": 4.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.4, "joint_mask": "upper_body"}]
   },
   {
     "idx": 38,
     "prompt": "a person does a salsa step.",
     "duration": 4.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "upper_body"}]
   },
   {
     "idx": 41,
     "prompt": "a person performs a breakdance toprock.",
     "duration": 4.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "arms"}]
   },
   {
     "idx": 43,
     "prompt": "a person dances flamenco, stamping their feet.",
     "duration": 5.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.4, "joint_mask": "upper_body"}]
   },
   {
     "idx": 46,
     "prompt": "a person jumps upward with both legs together.",
     "duration": 3.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "all"}]
   },
   {
     "idx": 48,
     "prompt": "a person jumps up.",
     "duration": 3.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.45, "joint_mask": "all"}]
   },
   {
     "idx": 50,
     "prompt": "a person performs a taekwondo kick, extending their leg.",
     "duration": 3.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "all"}]
   },
   {
     "idx": 51,
     "prompt": "a person performs a side kick.",
     "duration": 3.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "all"}]
   },
   {
     "idx": 52,
     "prompt": "a person does a front kick followed by a punch.",
     "duration": 4.0,
+    "variance": "high",
     "pose_keyframes_raw": [{"t_norm": 0.35, "joint_mask": "all"}, {"t_norm": 0.7, "joint_mask": "arms"}]
   },
   {
     "idx": 54,
     "prompt": "a person practices tai chi, performing slow circular movements.",
     "duration": 5.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.3, "joint_mask": "upper_body"}, {"t_norm": 0.7, "joint_mask": "upper_body"}]
   },
   {
     "idx": 3,
     "prompt": "a person walks forward, moving arms and legs while looking left and right.",
     "duration": 6.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "arms"}]
   },
   {
     "idx": 18,
     "prompt": "a person marches in place, swinging their arms.",
     "duration": 4.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.4, "joint_mask": "arms"}]
   },
   {
     "idx": 28,
     "prompt": "a person lifts a long gun, then walks forward.",
     "duration": 5.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.3, "joint_mask": "upper_body"}]
   },
   {
     "idx": 55,
     "prompt": "a person skips forward.",
     "duration": 4.0,
+    "variance": "low",
     "pose_keyframes_raw": [{"t_norm": 0.5, "joint_mask": "all"}]
   }
 ]

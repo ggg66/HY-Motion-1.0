@@ -320,10 +320,16 @@ def run_eval(args):
         constraints      = build_constraints_for_prompt(prompt_cfg, args)
         terminal_targets = extract_terminal_targets(prompt_cfg, args)
 
-        # Pose-only prompts need a much lower alpha (pose gradient ~13x larger
-        # than terminal because it spans 13 joints vs 1).
+        # Pose-only: lower alpha + mid-late cosine window (t=[0.2, 0.95]).
+        # PoseConstraint is a local structural constraint; applying it in
+        # early ODE steps locks the global trajectory prematurely.
         if set(constraint_types) == {"pose"}:
-            scheduler = StagedScheduler.constant(alpha_max=args.alpha_pose)
+            scheduler = StagedScheduler(
+                alpha_max=args.alpha_pose,
+                mode="cosine",
+                t_start=0.2,
+                t_end=0.95,
+            )
         elif args.scheduler == "staged":
             scheduler = StagedScheduler.make_staged(
                 alpha_terminal=args.alpha_terminal,
