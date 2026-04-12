@@ -603,10 +603,10 @@ def main():
     parser.add_argument("--smooth_kernel", type=int,  default=7,
                         help="Temporal smoothing window for steering vector (odd int). "
                              "Suppresses high-frequency jerk. Set to 1 to disable.")
-    parser.add_argument("--soft_norm_tau", type=float, default=5.0,
+    parser.add_argument("--soft_norm_tau", type=float, default=0.1,
                         help="τ for soft gradient normalization: scale = ‖g‖/(‖g‖+τ). "
                              "Steering self-attenuates when constraint is nearly satisfied. "
-                             "Larger τ → earlier attenuation. Default 5.0.")
+                             "Calibrated to typical gradient norms 0.1–0.3. Default 0.1.")
     parser.add_argument("--use_unit_grad", action="store_true",
                         help="[Ablation] Use original hard unit-norm gradient instead of "
                              "soft normalization. Restores pre-fix behaviour.")
