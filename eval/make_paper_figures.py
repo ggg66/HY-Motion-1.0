@@ -242,11 +242,10 @@ def make_fig1_pose_comparison(
                 pipeline, decoder, p, d, tn, jm_, tgt,
                 alpha=6.0, apply_latent_mask=True, use_hier=True,
             )
-            with torch.no_grad():
-                out = steerer.generate(
-                    text=p, seed_input=[43],
-                    duration_slider=d, cfg_scale=5.0,
-                )
+            out = steerer.generate(
+                text=p, seed_input=[43],
+                duration_slider=d, cfg_scale=5.0,
+            )
             return pipeline_output_to_world_joints(out)[0]
 
         steered = _load_or_generate(
@@ -294,11 +293,10 @@ def make_fig2_ablation(
                 pipeline, decoder, p, d, tn, jm_, tgt_,
                 alpha=6.0, apply_latent_mask=False, use_hier=True,
             )
-            with torch.no_grad():
-                out = steerer.generate(
-                    text=p, seed_input=[43],
-                    duration_slider=d, cfg_scale=5.0,
-                )
+            out = steerer.generate(
+                text=p, seed_input=[43],
+                duration_slider=d, cfg_scale=5.0,
+            )
             return pipeline_output_to_world_joints(out)[0]
 
         def _steer_full(p=prompt, d=dur, tn=t_norm, jm_=jm, tgt_=tgt):
@@ -306,11 +304,10 @@ def make_fig2_ablation(
                 pipeline, decoder, p, d, tn, jm_, tgt_,
                 alpha=6.0, apply_latent_mask=True, use_hier=True,
             )
-            with torch.no_grad():
-                out = steerer.generate(
-                    text=p, seed_input=[43],
-                    duration_slider=d, cfg_scale=5.0,
-                )
+            out = steerer.generate(
+                text=p, seed_input=[43],
+                duration_slider=d, cfg_scale=5.0,
+            )
             return pipeline_output_to_world_joints(out)[0]
 
         no_mask = _load_or_generate(
@@ -365,22 +362,20 @@ def make_fig3_multiconstraint(
                 pipeline, decoder, p, d, tn, jm_, tgt_,
                 alpha=6.0, apply_latent_mask=True, use_hier=True,
             )
-            with torch.no_grad():
-                out = steerer.generate(
-                    text=p, seed_input=[43],
-                    duration_slider=d, cfg_scale=5.0,
-                )
+            out = steerer.generate(
+                text=p, seed_input=[43],
+                duration_slider=d, cfg_scale=5.0,
+            )
             return pipeline_output_to_world_joints(out)[0]
 
         def _steer_pose_foot(p=prompt, d=dur, tn=t_norm, jm_=jm, tpt=target_pose_t):
             steerer = _build_pose_foot_steerer(
                 pipeline, decoder, tn, jm_, tpt, alpha=6.0,
             )
-            with torch.no_grad():
-                out = steerer.generate(
-                    text=p, seed_input=[43],
-                    duration_slider=d, cfg_scale=5.0,
-                )
+            out = steerer.generate(
+                text=p, seed_input=[43],
+                duration_slider=d, cfg_scale=5.0,
+            )
             return pipeline_output_to_world_joints(out)[0]
 
         pose_only = _load_or_generate(
