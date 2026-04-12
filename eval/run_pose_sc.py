@@ -204,20 +204,21 @@ def run_single(
     err_base = _pose_hit_error(base_joints[0], t_norm, target_np, joint_mask)
 
     # ---- 3. Build PoseConstraint and scheduler ----
-    pc        = PoseConstraint(
+    pc = PoseConstraint(
         keyframes=[(t_norm, target_t)],
         joint_mask=joint_mask,
         sigma_frac=sigma_frac,
+        use_hierarchical=args.use_hierarchical,
     )
     constraint = CompositeConstraint([(pc, 1.0)])
 
-    # Mid-to-late cosine schedule: pose is a local structural constraint,
-    # should not lock down global trajectory in early ODE steps.
+    # Pose-only schedule: [0.5, 0.88] — let model settle dynamics first,
+    # then steer body config in the refinement phase (established in ablation B3).
     scheduler = StagedScheduler(
         alpha_max=alpha_pose,
         mode="cosine",
-        t_start=0.2,
-        t_end=0.95,
+        t_start=0.5,
+        t_end=0.88,
     )
 
     steerer = FlowSteerer(
@@ -229,6 +230,11 @@ def run_single(
         smooth_kernel=args.smooth_kernel,
         soft_norm_tau=args.soft_norm_tau,
         use_unit_grad=args.use_unit_grad,
+        max_steer_ratio=args.max_steer_ratio,
+        ema_momentum=args.ema_momentum,
+        apply_latent_mask=args.apply_latent_mask,
+        latent_mask_transl=args.latent_mask_transl,
+        latent_mask_root_rot=args.latent_mask_root_rot,
     )
 
     # ---- 4. Steered generation (same seed) ----
@@ -333,17 +339,29 @@ def main():
     parser.add_argument("--seeds",         default="42",
                         help="Comma-separated seeds.  Each seed is run independently "
                              "with its own target (self-consistency).")
-    parser.add_argument("--alpha_pose",    type=float, default=8.0,
-                        help="Steering strength for PoseConstraint.")
+    parser.add_argument("--alpha_pose",    type=float, default=1.0,
+                        help="Steering strength for PoseConstraint. Default 1.0 for "
+                             "per-frame normalization (14× stronger per-element than flat).")
     parser.add_argument("--alpha_sweep",   default=None,
                         help="Comma-separated list of alpha values to sweep "
                              "(overrides --alpha_pose; output_dir gets alpha suffix).")
     parser.add_argument("--steps",         type=int,   default=50)
     parser.add_argument("--smooth_kernel", type=int,   default=7)
-    parser.add_argument("--soft_norm_tau", type=float, default=0.001,
-                        help="τ for soft gradient normalization. Default 0.001.")
+    parser.add_argument("--soft_norm_tau", type=float, default=0.1,
+                        help="τ (relative multiplier) for adaptive soft-norm. "
+                             "τ_abs = τ × mean(‖g_frame‖). Default 0.1.")
     parser.add_argument("--use_unit_grad", action="store_true",
-                        help="[Ablation] Use hard unit-norm gradient (pre-fix behaviour).")
+                        help="[Ablation] Use hard unit-norm gradient.")
+    parser.add_argument("--max_steer_ratio", type=float, default=0.3,
+                        help="Trust region: per-frame ‖α·s‖ ≤ max_steer_ratio × ‖v‖.")
+    parser.add_argument("--ema_momentum",    type=float, default=0.7,
+                        help="EMA coefficient for steering direction across ODE steps.")
+    parser.add_argument("--use_hierarchical", action="store_true",
+                        help="Hierarchical joint weighting: wrists/shoulders 3×, torso 0.5×.")
+    parser.add_argument("--apply_latent_mask", action="store_true",
+                        help="Attenuate steering on transl/root_rot latent dims.")
+    parser.add_argument("--latent_mask_transl",   type=float, default=0.1)
+    parser.add_argument("--latent_mask_root_rot", type=float, default=0.3)
     parser.add_argument("--cfg_scale",     type=float, default=5.0)
     parser.add_argument("--gpu_id",        type=int,   default=0)
     args = parser.parse_args()
