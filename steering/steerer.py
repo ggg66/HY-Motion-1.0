@@ -9,8 +9,20 @@ Steering step (at each t → t+dt):
     x̂_1 = x_t + (1 - t) * v           one-step clean estimate (t=1 is data)
     joints = decoder(x̂_1)              differentiable 201D → 3D joints
     L = constraints(joints)             scalar constraint loss
-    s_t = -Norm(∇_{x_t} L)            steering direction
+    s_t = -SoftNorm(∇_{x_t} L)         steering direction (soft-normalized)
     x_{t+dt} = x_t + dt * (v + α(t) * s_t)   modified Euler step
+
+Soft normalization (default):
+    scale = ‖g‖ / (‖g‖ + τ)
+    s_t   = -scale · g / ‖g‖
+
+When the gradient is large (constraint far from satisfied), scale ≈ 1 and
+the steering is near unit-strength.  When the gradient is small (constraint
+nearly satisfied), scale ≈ 0 and the steering self-attenuates — preventing
+the "keep pushing at full strength when already close" failure mode that
+causes jerk and contact violations under the hard unit-norm scheme.
+
+Set use_unit_grad=True to restore the original unit-norm behaviour (ablation).
 
 Because v is computed with torch.no_grad(), the gradient ∇_{x_t} L flows only
 through the analytical path  x_t → x̂_1 (identity + constant shift),
@@ -45,13 +57,19 @@ class FlowSteerer:
     Wraps a frozen MotionFlowMatching pipeline and adds constraint steering.
 
     Args:
-        pipeline:      loaded MotionFlowMatching (weights already loaded)
-        decoder:       MotionDecoder for differentiable latent → joints
-        constraints:   CompositeConstraint (or any callable joints→scalar)
-        scheduler:     StagedScheduler controlling α(t)
-        steps:         number of Euler steps (default matches pipeline.validation_steps)
-        grad_clip:     max norm for the steering gradient (default 1.0)
-        verbose:       print per-step loss
+        pipeline:        loaded MotionFlowMatching (weights already loaded)
+        decoder:         MotionDecoder for differentiable latent → joints
+        constraints:     CompositeConstraint (or any callable joints→scalar)
+        scheduler:       StagedScheduler controlling α(t)
+        steps:           number of Euler steps (default matches pipeline.validation_steps)
+        grad_clip:       elementwise clip for raw gradient (default 1.0)
+        smooth_kernel:   temporal smoothing window (odd int, default 7)
+        soft_norm_tau:   τ in soft-norm  scale = ‖g‖/(‖g‖+τ).
+                         Larger τ → steering auto-attenuates sooner when loss is small.
+                         Default 5.0.  Set use_unit_grad=True to bypass.
+        use_unit_grad:   if True, use original unit-norm steering (ablation baseline).
+                         Default False (soft-norm is recommended).
+        verbose:         print per-step loss + gradient diagnostics
     """
 
     def __init__(
@@ -64,7 +82,9 @@ class FlowSteerer:
         timed_constraints: Optional[List[tuple]] = None,
         steps: Optional[int] = None,
         grad_clip: float = 1.0,
-        smooth_kernel: int = 5,
+        smooth_kernel: int = 7,
+        soft_norm_tau: float = 5.0,
+        use_unit_grad: bool = False,
         verbose: bool = False,
     ):
         self.pipeline = pipeline
@@ -84,6 +104,8 @@ class FlowSteerer:
         self.steps = steps or pipeline.validation_steps
         self.grad_clip = grad_clip
         self.smooth_kernel = smooth_kernel
+        self.soft_norm_tau = soft_norm_tau
+        self.use_unit_grad = use_unit_grad
         self.verbose = verbose
 
     # ------------------------------------------------------------------
@@ -249,6 +271,27 @@ class FlowSteerer:
     # Internal: constraint gradient computation
     # ------------------------------------------------------------------
 
+    def _apply_soft_norm(self, grad_flat: Tensor) -> Tensor:
+        """
+        Apply soft normalization to a (B, D) gradient tensor.
+
+        use_unit_grad=True  → hard unit-norm (original behaviour, ablation)
+        use_unit_grad=False → soft-norm: scale = ‖g‖/(‖g‖+τ)
+
+        Soft-norm self-attenuates when the gradient (and hence the loss) is
+        small, avoiding the "keep pushing at full strength when already close"
+        failure mode that causes jerk under hard unit-norm.
+        """
+        grad_norm = grad_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        unit = grad_flat / grad_norm
+
+        if self.use_unit_grad:
+            return unit                                   # hard unit-norm (ablation)
+
+        tau   = self.soft_norm_tau
+        scale = grad_norm / (grad_norm + tau)             # ∈ (0, 1)
+        return scale * unit
+
     def _compute_steering(
         self,
         x: Tensor,           # (B, T_max, 201) current state
@@ -259,7 +302,7 @@ class FlowSteerer:
     ) -> tuple[Tensor, float]:
         """
         Returns (steering, loss_value).
-        steering: (B, T_max, 201) – same shape as v, L2-normalised per sample
+        steering: (B, T_max, 201) – same shape as v, soft-normalised per sample.
 
         constraints_override: if provided, use this composite instead of
             self.constraints (used by the timed-composite path).
@@ -285,6 +328,13 @@ class FlowSteerer:
         grad = torch.autograd.grad(loss, x_req)[0]  # (B, T_max, 201)
 
         B, T_max, D = grad.shape
+
+        # Zero out the padding frames beyond valid length so they do not
+        # contribute to the norm estimate and receive no steering.
+        if length < T_max:
+            grad = grad.clone()
+            grad[:, length:, :] = 0.0
+
         grad_flat = grad.view(B, -1)
 
         # Clip element-wise BEFORE normalizing so outlier latent dims don't
@@ -292,14 +342,19 @@ class FlowSteerer:
         if self.grad_clip < float("inf"):
             grad_flat = grad_flat.clamp(-self.grad_clip, self.grad_clip)
 
-        # Normalize per-sample so α fully controls magnitude regardless of loss scale.
-        grad_norm = grad_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        grad_flat = grad_flat / grad_norm
+        # Soft (or hard-unit) normalization — see _apply_soft_norm docstring.
+        grad_scaled = self._apply_soft_norm(grad_flat)
 
-        steering = -grad_flat.view(B, T_max, D)   # negative gradient → constraint satisfied
+        if self.verbose:
+            raw_norm = grad_flat.norm(dim=-1)
+            print(f"    grad_norm mean={raw_norm.mean().item():.3f}  "
+                  f"max={raw_norm.max().item():.3f}  "
+                  f"loss={loss_val:.5f}  "
+                  f"soft_norm={'off' if self.use_unit_grad else f'τ={self.soft_norm_tau}'}")
+
+        steering = -grad_scaled.view(B, T_max, D)  # negative gradient → constraint satisfied
 
         # Temporal smoothing: suppress high-frequency jerk introduced by steering.
-        # avg_pool1d along the time axis with a small window.
         if self.smooth_kernel > 1:
             pad = self.smooth_kernel // 2
             s_t = steering.permute(0, 2, 1)                                  # (B, D, T_max)
@@ -324,11 +379,7 @@ class FlowSteerer:
         x_t → x̂_1 → joints graph, normalized separately, then scaled by its
         own α(t) and accumulated in latent space:
 
-            steering = Σ_i  α_i(t) · -Norm(∇_{x_t} L_i)
-
-        This prevents a high-magnitude constraint (e.g. terminal, ~metres error)
-        from dominating the gradient direction and suppressing a low-magnitude
-        one (e.g. contact, ~centimetres error).
+            steering = Σ_i  α_i(t) · -SoftNorm(∇_{x_t} L_i)
 
         Returns:
             (total_steering, sum_of_loss_values)
@@ -352,11 +403,17 @@ class FlowSteerer:
 
             grad = torch.autograd.grad(loss, x_req, retain_graph=retain)[0]  # (B, T_max, D)
 
+            # Zero out padding frames
+            if length < T_max:
+                grad = grad.clone()
+                grad[:, length:, :] = 0.0
+
             grad_flat = grad.view(B, -1)
             if self.grad_clip < float("inf"):
                 grad_flat = grad_flat.clamp(-self.grad_clip, self.grad_clip)
-            grad_norm = grad_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-            steering_i = -(grad_flat / grad_norm).view(B, T_max, D)
+
+            grad_scaled = self._apply_soft_norm(grad_flat)
+            steering_i = -grad_scaled.view(B, T_max, D)
 
             if self.smooth_kernel > 1:
                 pad = self.smooth_kernel // 2
@@ -385,7 +442,9 @@ class FlowSteerer:
         constraint_schedulers: Optional[List[tuple]] = None,
         steps: int = 50,
         grad_clip: float = 1.0,
-        smooth_kernel: int = 5,
+        smooth_kernel: int = 7,
+        soft_norm_tau: float = 5.0,
+        use_unit_grad: bool = False,
         verbose: bool = False,
     ) -> "FlowSteerer":
         decoder = MotionDecoder.from_stats_dir(
@@ -402,5 +461,7 @@ class FlowSteerer:
             steps=steps,
             grad_clip=grad_clip,
             smooth_kernel=smooth_kernel,
+            soft_norm_tau=soft_norm_tau,
+            use_unit_grad=use_unit_grad,
             verbose=verbose,
         )

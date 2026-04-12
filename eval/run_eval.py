@@ -350,6 +350,8 @@ def run_eval(args):
             scheduler=scheduler,
             steps=args.steps,
             smooth_kernel=args.smooth_kernel,
+            soft_norm_tau=args.soft_norm_tau,
+            use_unit_grad=args.use_unit_grad,
             verbose=args.verbose,
         )
 
@@ -598,9 +600,16 @@ def main():
                              "Much smaller than alpha_terminal because pose gradient "
                              "is distributed across ~13 joints (vs 1 for terminal).")
     parser.add_argument("--steps",        type=int,   default=50)
-    parser.add_argument("--smooth_kernel", type=int,  default=5,
+    parser.add_argument("--smooth_kernel", type=int,  default=7,
                         help="Temporal smoothing window for steering vector (odd int). "
                              "Suppresses high-frequency jerk. Set to 1 to disable.")
+    parser.add_argument("--soft_norm_tau", type=float, default=5.0,
+                        help="τ for soft gradient normalization: scale = ‖g‖/(‖g‖+τ). "
+                             "Steering self-attenuates when constraint is nearly satisfied. "
+                             "Larger τ → earlier attenuation. Default 5.0.")
+    parser.add_argument("--use_unit_grad", action="store_true",
+                        help="[Ablation] Use original hard unit-norm gradient instead of "
+                             "soft normalization. Restores pre-fix behaviour.")
     parser.add_argument("--seeds",       default="42",
                         help="Comma-separated seed list (one motion per seed). "
                              "For Phase-1 eval use: 42,43,44")
