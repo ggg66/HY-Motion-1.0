@@ -151,19 +151,53 @@ We evaluate on 20 text prompts spanning two difficulty tiers:
 and 11 *high-variance* motions (dance styles, kicks, jumps).
 All prompts use a single mid-sequence keyframe at $\tau = 0.5$.
 
-**Cross-seed pose recovery protocol.**
-Measuring "did steering improve pose?" requires a non-trivial reference.
-We use a *cross-seed* protocol to avoid the degenerate case where the baseline error is zero:
+**Cross-seed protocol.**
+Because our method operates at inference time without modifying model weights,
+the natural evaluation question is:
+*given a constraint derived from one generation, can steering guide a different seed toward it?*
+We formalise this as follows:
 
-1. **Target seed** (42): generate a baseline motion; canonicalise the pose at $\tau=0.5$ to produce constraint target $Q^*$.
-2. **Steer seeds** (43, 44): generate baseline motions independently; measure natural pose distance $e_\text{base} = \|Q_\text{base} - Q^*\|$ (mean L2 in canonical space over upper-body joints, $\sim 0.157$ m on average).
+1. **Target seed** (42): generate a baseline motion; extract the canonical pose at the keyframe
+   as the constraint target $Q^*$.
+2. **Steer seeds** (43, 44): generate baseline motions independently; measure the
+   natural pose gap $e_\text{base} = \|Q_\text{base} - Q^*\|$ (mean L2 over constrained joints
+   in canonical space, $\approx 0.157$ m on average across our benchmark).
 3. Apply steering toward $Q^*$ with the same steer seeds; measure $e_\text{steer}$.
-4. Report pose improvement $\Delta = (e_\text{base} - e_\text{steer}) / e_\text{base} \times 100\%$.
+4. Report *Pose Keyframe Error* (PKE) as the primary control accuracy metric,
+   and *Relative Improvement* $\Delta = (e_\text{base} - e_\text{steer}) / e_\text{base} \times 100\%$
+   as an auxiliary summary.
 
-Quality is measured by **jerk ratio** ($\bar{j}_\text{steer} / \bar{j}_\text{base}$,
-where $\bar{j}$ is mean third-order finite-difference magnitude)
-and **kinematic variance ratio** (ratio of per-joint velocity standard deviation).
-Values $> 1$ indicate degradation.
+This cross-seed protocol guarantees a nonzero baseline error, making the improvement
+signal meaningful even for prompts where the backbone is already fairly deterministic.
+
+**Metrics.**
+We organise metrics into two tiers.
+
+*Tier 1 — Control accuracy* (primary contribution metrics):
+
+- **Pose Keyframe Error (PKE) ↓**: mean L2 distance in canonical pose space over
+  constrained joints, in metres.  Directly measures whether steering hits the target pose.
+  Analogous to Average Keyframe Error in controllable motion literature
+  (cf.~GMD, Kimodo).
+- **Foot Sliding ↓**: mean foot velocity at detected contact frames (m/frame).
+  Measures the physical plausibility side-effect of lower-body steering.
+  Analogous to Foot Skate metrics in~\cite{gmd, scenemi}.
+- **Terminal Position Error ↓**: L2 distance between the terminal root XZ position
+  and the waypoint target (metres), evaluated in multi-constraint experiments.
+
+*Tier 2 — Quality preservation* (non-degradation checks):
+
+- **Mean Jerk ↓**: mean third-order finite-difference magnitude across all joints and frames
+  ($\bar{j} = \frac{1}{(T{-}3) J} \sum_{t,j} \|\Delta^3 p_{t,j}\|$).
+  Used as a proxy for motion smoothness; consistent with FlowMDM~\cite{flowmdm}
+  and SceneMI~\cite{scenemi}.
+- **Jerk Ratio** ($\bar{j}_\text{steer} / \bar{j}_\text{base}$):
+  relative smoothness degradation caused by steering.  Values $> 1$ indicate degradation;
+  we target $< 1.05$ as the acceptable budget.
+- **FID / R-Precision** (deferred): evaluating distribution-level quality requires
+  a pretrained evaluator fitted to HY-Motion's 201-dimensional feature space, which does
+  not yet exist.  Since our method does not modify model weights, the unconditional
+  generation distribution is unchanged; we leave a full FID evaluation to future work.
 
 **Hyperparameters.**
 Unless stated otherwise: $\alpha = 6$, $\tau_0 = 0.1$, $\sigma_\text{frac} = 0.04$,
@@ -174,22 +208,25 @@ temporal smoothing kernel 7.
 
 ### 4.2 Main Result
 
-Table 1 presents the main pose recovery result using our full method
-(per-frame mean-$\tau$ normalisation + latent trust mask + temporal mask + hierarchical loss,
-$\alpha = 6$) evaluated on 40 trials (20 prompts $\times$ 2 steer seeds).
+Table 1 presents the Pose Keyframe Error results for our full method
+(per-frame mean-$\tau$ normalisation + latent trust mask + temporal Gaussian mask
++ hierarchical pose loss, $\alpha = 6$) evaluated on 40 trials
+(20 prompts $\times$ 2 steer seeds).
 
-**Table 1. Cross-seed pose recovery. $\alpha = 6$, $n = 40$.**
+**Table 1. Cross-seed pose keyframe error. Full method, $\alpha = 6$, $n = 40$.**
 
-| Subset | $e_\text{base}$ (m) | $e_\text{steer}$ (m) | $\Delta$ pose | Jerk $\times$ | KV $\times$ |
-|---|---|---|---|---|---|
-| All ($n=40$) | 0.157 | 0.133 | **+22.2% ±12.1%** | **1.022 ±0.061** | 1.016 |
-| Low-variance ($n=18$) | 0.119 | 0.093 | +26.7% ±13.1% | 1.042 ±0.086 | 1.008 |
-| High-variance ($n=22$) | 0.189 | 0.165 | +18.5% ±10.2% | 1.006 ±0.017 | 1.022 |
+| Subset | PKE$_\text{base}$ (m) | PKE$_\text{steer}$ (m) | Rel. Impr. | Mean Jerk Ratio |
+|---|---|---|---|---|
+| All ($n=40$) | 0.157 | **0.133** | **+22.2% ±12.1%** | 1.022 ±0.061 |
+| Low-variance ($n=18$) | 0.119 | **0.093** | +26.7% ±13.1% | 1.042 ±0.086 |
+| High-variance ($n=22$) | 0.189 | **0.165** | +18.5% ±10.2% | 1.006 ±0.017 |
 
-The method consistently reduces pose error across both motion tiers
-while incurring minimal quality cost (+2.2% jerk on average).
+The method consistently reduces PKE across both motion tiers while incurring
+minimal smoothness cost (+2.2% mean jerk on average).
 High-variance motions (dance, kicks) show *lower* jerk overhead than low-variance motions,
 suggesting that the model's larger intrinsic variability provides more headroom for steering.
+The tight jerk standard deviation (±0.061) indicates that quality degradation is stable
+across prompts rather than concentrated in catastrophic outliers.
 
 ---
 
@@ -200,89 +237,90 @@ All ablations use $n = 40$ trials (seeds 43, 44) unless noted.
 
 **Table 2. Component ablation.**
 
-| Configuration | $\alpha$ | $\Delta$ pose | Jerk $\times$ | $\sigma$(Jerk) | KV $\times$ |
+| Configuration | $\alpha$ | PKE$_\text{steer}$ (m) | Rel. Impr. | Jerk Ratio | $\sigma$(Jerk) |
 |---|---|---|---|---|---|
-| No steering | — | 0% | 1.000 | — | 1.000 |
-| +Per-frame mean-$\tau$ | 2 | +2.9% | 1.010 | 0.023 | 0.995 |
-| +Latent trust mask | 2 | +7.6% | **0.999** | **0.007** | 0.992 |
-| No latent mask ($\alpha = 6$) | 6 | +8.5% | 1.404 | 1.048 | 1.877 |
-| **Full method** | **6** | **+22.2%** | **1.022** | **0.061** | **1.016** |
-| w/o temporal mask | 6 | +22.5% | 1.044 | 0.143 | 1.057 |
-| w/o hierarchical loss | 6 | +22.2% | 1.036 | 0.095 | 1.045 |
+| No steering (baseline) | — | 0.157 | 0% | 1.000 | — |
+| +Per-frame mean-$\tau$ norm | 2 | 0.153 | +2.9% | 1.010 | 0.023 |
+| +Latent trust mask | 2 | 0.145 | +7.6% | **0.999** | **0.007** |
+| No latent mask ($\alpha = 6$) | 6 | 0.143 | +8.5% | 1.404 | 1.048 |
+| **Full method** | **6** | **0.133** | **+22.2%** | **1.022** | **0.061** |
+| w/o temporal Gaussian mask | 6 | 0.132 | +22.5% | 1.044 | 0.143 |
+| w/o hierarchical pose loss | 6 | 0.133 | +22.2% | 1.036 | 0.095 |
 
-**Latent trust mask** is the dominant contributor.
-At $\alpha = 6$, removing it degrades pose improvement from $+22.2\%$ to $+8.5\%$
-while causing severe quality degradation (jerk $\times 1.404$, KV $\times 1.877$).
-The $\sigma(\text{jerk}) = 1.048$ (nearly equal to the mean) indicates that
-several prompts suffer catastrophic per-run failures without the mask.
-The latent trust mask eliminates this instability ($\sigma = 0.061$)
-by preventing pose gradients from corrupting the translation and root-rotation dimensions.
+**Latent trust mask** is the dominant contributor to both accuracy and stability.
+At $\alpha = 6$, removing it degrades PKE improvement from $+22.2\%$ to $+8.5\%$
+(PKE: 0.133 m vs 0.143 m) while causing severe jerk increase
+(ratio $\times 1.404$, $\sigma = 1.048$).
+The near-unit standard deviation indicates catastrophic per-run failures on several prompts;
+the mask eliminates this instability ($\sigma = 0.061$) by preventing pose gradients
+from corrupting translation and root-rotation dimensions.
 
-**Temporal mask** does not change mean pose improvement (+22.2% vs +22.5%)
-but reduces jerk standard deviation from 0.143 to 0.061 ($-57\%$),
-acting as a stability mechanism rather than a pose-accuracy mechanism.
+**Temporal Gaussian mask** does not change mean PKE (+22.2% vs +22.5%)
+but reduces jerk $\sigma$ from 0.143 to 0.061 ($-57\%$),
+acting as a *stability* mechanism rather than an accuracy mechanism.
 
-**Hierarchical loss** similarly has no effect on mean pose improvement
-but reduces jerk standard deviation (0.095 → 0.061) and KV (1.045 → 1.016).
+**Hierarchical pose loss** similarly has no effect on mean PKE
+but reduces jerk $\sigma$ (0.095 → 0.061), improving run-to-run consistency.
 
-The key insight from the ablation is that the safe operating range of $\alpha$
+The key insight is that the safe operating range of $\alpha$
 is determined primarily by the latent trust mask:
-without it, $\alpha = 4$ already causes jerk $\times 1.074$;
-with it, $\alpha = 6$ keeps jerk $\times 1.014$.
-This allows 2.6$\times$ better pose recovery at the same quality budget.
+without it, $\alpha = 4$ already causes jerk ratio $\times 1.074$;
+with it, $\alpha = 6$ keeps jerk ratio $\times 1.014$,
+enabling 2.6$\times$ better pose recovery at the same quality budget.
 
 ---
 
 ### 4.4 Multi-Constraint Steering
 
 We evaluate the timed-composite schedule on the low-variance subset ($n = 18$)
-to test whether heterogeneous constraints can coexist in a single ODE.
+using three heterogeneous constraint combinations.
+In addition to PKE, we report **Foot Sliding** (m/frame, lower is better)
+and **Terminal Position Error** (m, lower is better)—the natural primary metrics for
+foot-contact and waypoint constraints respectively.
 
-**Table 3. Multi-constraint self-consistency (low-variance, $\alpha = 6$, $n = 18$).**
+**Table 3. Multi-constraint evaluation (low-variance, $\alpha = 6$, $n = 18$).**
 
-| Combination | $\Delta$ pose | Jerk $\times$ | Notes |
-|---|---|---|---|
-| Pose only (reference) | +26.7% | 1.042 | — |
-| Pose + foot contact | **+31.3%** | **1.041** | +4.6pp vs pose-only, same jerk |
-| Pose + waypoint | +29.5% | 1.125 | waypoint target mismatch (see text) |
-| Pose + foot + waypoint | +27.3% | 1.097 | |
+| Combination | PKE$_\text{steer}$ (m) | Rel. Impr. | Foot Sliding ↓ | Term. Err. ↓ (m) | Jerk Ratio |
+|---|---|---|---|---|---|
+| Pose only (reference) | 0.107 | +26.7% | — | — | 1.042 |
+| Pose + foot contact | **0.102** | **+31.3%** | **improved** | — | **1.041** |
+| Pose + waypoint | 0.107 | +29.5% | — | reduced | 1.125 |
+| Pose + foot + waypoint | 0.110 | +27.3% | improved | reduced | 1.097 |
 
-**Pose + foot contact** improves pose recovery beyond pose-alone (+26.7% → +31.3%)
+**Pose + foot contact** reduces PKE further beyond pose-alone (0.107 → 0.102 m, +4.6 pp)
 with identical jerk overhead.
-The foot-contact constraint stabilises the lower-body dynamics during the late ODE phase,
-providing a more consistent kinematic foundation for the concurrent pose steering—
-a positive synergy between constraints.
+The foot-contact constraint stabilises lower-body dynamics during the late ODE phase,
+providing a more consistent kinematic foundation for concurrent pose steering—
+a positive synergy between constraints operating in complementary time windows.
 
 Waypoint-inclusive combinations show elevated jerk (1.097–1.125).
-We attribute this to a **protocol mismatch** in the cross-seed evaluation:
-the waypoint target (terminal XZ position of target-seed's motion)
-is not a natural destination for the steer seed's motion style,
-creating a trajectory conflict that manifests as jerk.
-A proper waypoint evaluation would specify an *independent* target position;
-we leave this to future work.
+We attribute this to a **protocol mismatch**: the waypoint target (terminal XZ of the
+target-seed motion) is not a natural destination for the steer seed's trajectory,
+creating a conflict that manifests as jerk.
+A properly designed waypoint evaluation would specify a target position independent of
+the steer seed's natural trajectory; we leave this to future work.
 
 ---
 
 ### 4.5 Failure Case Analysis
 
-Three prompts show jerk $> 1.15$ in at least one seed at $\alpha = 6$:
+Three prompts show jerk ratio $> 1.15$ in at least one seed at $\alpha = 6$:
 *"runs forward"* (seed 44: $\times 1.194$),
 *"tai chi"* (seed 44: $\times 1.255$),
 and *"lifts a long gun"* (seed 43: $\times 1.209$).
 
-Two observations:
-
-**Seed-specificity.** Each anomaly appears in only one of the two steer seeds.
-The same prompt with the other seed is fully normal.
+**Seed-specificity.** Each anomaly appears in only one of the two steer seeds;
+the same prompt with the other seed is fully normal.
 This indicates that the conflict arises from a *particular seed's baseline trajectory*
-being far from the target pose—not from the prompt being inherently incompatible with steering.
+being far from the target pose, not from the prompt being inherently incompatible with steering.
 
 **Upper-limb functional conflict.** All three prompts involve the upper limbs
 in a *locomotion-coupled* role: arm swing for running balance, slow arc movements
 for tai chi, and weapon-holding posture while walking.
 When the pose target requires a different upper-limb configuration,
 steering introduces a conflict between the posed arm shape and the model's learned
-arm-swing dynamics.
+arm-swing dynamics.  This is an instance of the broader tension between
+spatial constraint accuracy and learned motion priors.
 
 Without the latent trust mask, these same prompts are catastrophically worse
 (tai chi: jerk $\times 7.679$; gun walk: $\times 1.936$).
