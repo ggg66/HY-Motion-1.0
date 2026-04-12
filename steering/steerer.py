@@ -57,20 +57,30 @@ class FlowSteerer:
     Wraps a frozen MotionFlowMatching pipeline and adds constraint steering.
 
     Args:
-        pipeline:        loaded MotionFlowMatching (weights already loaded)
-        decoder:         MotionDecoder for differentiable latent → joints
-        constraints:     CompositeConstraint (or any callable joints→scalar)
-        scheduler:       StagedScheduler controlling α(t)
-        steps:           number of Euler steps (default matches pipeline.validation_steps)
-        grad_clip:       elementwise clip for raw gradient (default 1.0)
-        smooth_kernel:   temporal smoothing window (odd int, default 7)
-        soft_norm_tau:   τ in soft-norm  scale = ‖g‖/(‖g‖+τ).
-                         Larger τ → steering auto-attenuates sooner when loss is small.
-                         Default 0.001 (calibrated: empirical ‖g‖≈0.003 over T×D dims).
-                         Set use_unit_grad=True to bypass.
-        use_unit_grad:   if True, use original unit-norm steering (ablation baseline).
-                         Default False (soft-norm is recommended).
-        verbose:         print per-step loss + gradient diagnostics
+        pipeline:         loaded MotionFlowMatching (weights already loaded)
+        decoder:          MotionDecoder for differentiable latent → joints
+        constraints:      CompositeConstraint (or any callable joints→scalar)
+        scheduler:        StagedScheduler controlling α(t)
+        steps:            number of Euler steps (default matches pipeline.validation_steps)
+        grad_clip:        elementwise clip for raw gradient (default 1.0)
+        smooth_kernel:    temporal smoothing window (odd int, default 7)
+        soft_norm_tau:    τ in per-frame adaptive soft-norm.
+                          Now a *relative* multiplier: τ_abs = τ × median(‖g_frame‖).
+                          scale = ‖g_frame‖ / (‖g_frame‖ + τ_abs) per frame.
+                          Frames near keyframe (large gradient) → scale ≈ 1.
+                          Frames far from keyframe (small gradient) → scale ≈ 0.
+                          Default 0.1.  Set use_unit_grad=True to bypass.
+        use_unit_grad:    if True, per-frame unit-norm (ablation baseline).
+                          Default False (adaptive soft-norm recommended).
+        max_steer_ratio:  trust region — clamp per-frame ‖α·s‖ to at most
+                          max_steer_ratio × ‖v‖.  Prevents steering from
+                          overriding the model's own dynamics.  Default 0.3.
+                          Set to 0.0 to disable.
+        ema_momentum:     EMA coefficient for steering direction across ODE steps.
+                          s_ema ← μ·s_ema + (1−μ)·s_new.
+                          Smooths step-to-step direction changes.  Default 0.7.
+                          Set to 0.0 to disable (fresh gradient each step).
+        verbose:          print per-step loss + gradient diagnostics
     """
 
     def __init__(
@@ -84,8 +94,10 @@ class FlowSteerer:
         steps: Optional[int] = None,
         grad_clip: float = 1.0,
         smooth_kernel: int = 7,
-        soft_norm_tau: float = 0.001,
+        soft_norm_tau: float = 0.1,
         use_unit_grad: bool = False,
+        max_steer_ratio: float = 0.3,
+        ema_momentum: float = 0.7,
         verbose: bool = False,
     ):
         self.pipeline = pipeline
@@ -107,6 +119,8 @@ class FlowSteerer:
         self.smooth_kernel = smooth_kernel
         self.soft_norm_tau = soft_norm_tau
         self.use_unit_grad = use_unit_grad
+        self.max_steer_ratio = max_steer_ratio
+        self.ema_momentum = ema_momentum
         self.verbose = verbose
 
     # ------------------------------------------------------------------
@@ -214,6 +228,7 @@ class FlowSteerer:
 
         # --- Manual Euler loop with steering ---
         t_vals = torch.linspace(0.0, 1.0, self.steps + 1, device=device)
+        steer_ema: Optional[torch.Tensor] = None   # EMA steering buffer (lazy init)
 
         for i in range(len(t_vals) - 1):
             t_cur = t_vals[i].item()
@@ -224,9 +239,12 @@ class FlowSteerer:
             v = velocity_fn(t_cur, x)   # (B, T_max, 201)
 
             # Constraint steering
+            raw_steering: Optional[torch.Tensor] = None
+            loss_val: float = 0.0
+            alpha: float = 0.0
+
             if self.timed_constraints is not None:
                 # Path 1: time-staged composite (recommended).
-                # Build a dynamic composite from constraints active at t_cur.
                 active_pairs = [
                     (c, w) for c, w, t0, t1 in self.timed_constraints
                     if t0 <= t_cur <= t1
@@ -234,32 +252,56 @@ class FlowSteerer:
                 alpha = self.scheduler(t_cur)
                 if active_pairs and alpha > 0.0:
                     composite = CompositeConstraint(active_pairs)
-                    steering, loss_val = self._compute_steering(
+                    raw_steering, loss_val = self._compute_steering(
                         x, v, t_cur, length, constraints_override=composite
                     )
-                    v = v + alpha * steering
                     if self.verbose:
                         names = [type(c).__name__ for c, _ in active_pairs]
                         print(f"  step {i:3d} | t={t_cur:.3f} | α={alpha:.1f} "
                               f"| loss={loss_val:.5f} | {names}")
+
             elif self.constraint_schedulers is not None:
                 # Path 2: per-constraint independent gradients (ablation only).
                 active = [(c, s) for c, s in self.constraint_schedulers if s(t_cur) > 0.0]
                 if active:
-                    steering, loss_val = self._compute_steering_per_constraint(
+                    raw_steering, loss_val = self._compute_steering_per_constraint(
                         x, v, t_cur, length, active
                     )
-                    v = v + steering
+                    alpha = 1.0   # alpha already baked into per-constraint steering
                     if self.verbose:
                         print(f"  step {i:3d} | t={t_cur:.3f} | loss={loss_val:.5f}")
+
             elif self.constraints is not None:
                 # Path 3: static composite (Stage 1 style).
                 alpha = self.scheduler(t_cur)
                 if alpha > 0.0:
-                    steering, loss_val = self._compute_steering(x, v, t_cur, length)
-                    v = v + alpha * steering
+                    raw_steering, loss_val = self._compute_steering(x, v, t_cur, length)
                     if self.verbose:
                         print(f"  step {i:3d} | t={t_cur:.3f} | α={alpha:.1f} | loss={loss_val:.5f}")
+
+            # Apply EMA smoothing, trust region, then add to velocity
+            if raw_steering is not None and alpha > 0.0:
+                # EMA: smooth steering direction across steps
+                if self.ema_momentum > 0.0:
+                    if steer_ema is None:
+                        steer_ema = raw_steering
+                    else:
+                        steer_ema = self.ema_momentum * steer_ema + \
+                                    (1.0 - self.ema_momentum) * raw_steering
+                    steering = steer_ema
+                else:
+                    steering = raw_steering
+
+                steer_delta = alpha * steering   # (B, T_max, D)
+
+                # Trust region: per-frame, clamp ‖α·s‖ ≤ max_steer_ratio × ‖v‖
+                if self.max_steer_ratio > 0.0:
+                    v_norm = v.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # (B, T, 1)
+                    s_norm = steer_delta.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+                    ratio_cap = torch.clamp(self.max_steer_ratio * v_norm / s_norm, max=1.0)
+                    steer_delta = steer_delta * ratio_cap
+
+                v = v + steer_delta
 
             x = x + dt * v
 
@@ -272,25 +314,37 @@ class FlowSteerer:
     # Internal: constraint gradient computation
     # ------------------------------------------------------------------
 
-    def _apply_soft_norm(self, grad_flat: Tensor) -> Tensor:
+    def _normalize_grad(self, grad: Tensor) -> Tensor:
         """
-        Apply soft normalization to a (B, D) gradient tensor.
+        Per-frame normalization: (B, T, D) → (B, T, D).
 
-        use_unit_grad=True  → hard unit-norm (original behaviour, ablation)
-        use_unit_grad=False → soft-norm: scale = ‖g‖/(‖g‖+τ)
+        Each frame is normalised independently over the D=201 latent dimensions,
+        so keyframe-adjacent frames (large gradient) are not diluted by the
+        many zero-gradient frames elsewhere in the sequence.
 
-        Soft-norm self-attenuates when the gradient (and hence the loss) is
-        small, avoiding the "keep pushing at full strength when already close"
-        failure mode that causes jerk under hard unit-norm.
+        use_unit_grad=True:
+            unit = g / ‖g‖  per frame  (hard unit-norm, ablation)
+
+        use_unit_grad=False  (default):
+            Adaptive soft-norm with τ relative to per-sample median frame-norm:
+                τ_abs  = soft_norm_tau × median_t(‖g_frame‖)   (B, 1, 1)
+                scale  = ‖g_frame‖ / (‖g_frame‖ + τ_abs)       (B, T, 1)
+                output = scale × unit
+            Keyframe frames (‖g‖ >> τ_abs): scale ≈ 1  → full strength
+            Off-keyframe frames (‖g‖ << τ_abs): scale ≈ 0  → suppressed
+            soft_norm_tau is now a *relative* multiplier, not an absolute threshold.
         """
-        grad_norm = grad_flat.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        unit = grad_flat / grad_norm
+        B, T, D = grad.shape
+        grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # (B, T, 1)
+        unit = grad / grad_norm
 
         if self.use_unit_grad:
-            return unit                                   # hard unit-norm (ablation)
+            return unit
 
-        tau   = self.soft_norm_tau
-        scale = grad_norm / (grad_norm + tau)             # ∈ (0, 1)
+        # Adaptive τ: relative to this step's median frame-norm (per sample)
+        median_norm = grad_norm.detach().median(dim=1, keepdim=True).values.clamp(min=1e-8)
+        tau_abs = self.soft_norm_tau * median_norm                     # (B, 1, 1)
+        scale = grad_norm / (grad_norm + tau_abs)                      # (B, T, 1)
         return scale * unit
 
     def _compute_steering(
@@ -336,24 +390,25 @@ class FlowSteerer:
             grad = grad.clone()
             grad[:, length:, :] = 0.0
 
-        grad_flat = grad.view(B, -1)
-
         # Clip element-wise BEFORE normalizing so outlier latent dims don't
         # collapse the steering direction into a single dimension.
         if self.grad_clip < float("inf"):
-            grad_flat = grad_flat.clamp(-self.grad_clip, self.grad_clip)
+            grad = grad.clamp(-self.grad_clip, self.grad_clip)
 
-        # Soft (or hard-unit) normalization — see _apply_soft_norm docstring.
-        grad_scaled = self._apply_soft_norm(grad_flat)
+        # Per-frame normalization — see _normalize_grad docstring.
+        # Replaces the old sample-level flat normalization: keyframe-adjacent
+        # frames (large gradient) are no longer diluted by off-keyframe zeros.
+        grad_scaled = self._normalize_grad(grad)                  # (B, T_max, D)
 
         if self.verbose:
-            raw_norm = grad_flat.norm(dim=-1)
-            print(f"    grad_norm mean={raw_norm.mean().item():.3f}  "
-                  f"max={raw_norm.max().item():.3f}  "
-                  f"loss={loss_val:.5f}  "
-                  f"soft_norm={'off' if self.use_unit_grad else f'τ={self.soft_norm_tau}'}")
+            frame_norms = grad.norm(dim=-1)                       # (B, T_max)
+            active = (frame_norms > 1e-4).float().sum(dim=1)
+            print(f"    frame_norm: mean={frame_norms.mean():.5f}  "
+                  f"max={frame_norms.max():.5f}  "
+                  f"active_frames={active.mean():.1f}  "
+                  f"loss={loss_val:.5f}")
 
-        steering = -grad_scaled.view(B, T_max, D)  # negative gradient → constraint satisfied
+        steering = -grad_scaled                                    # (B, T_max, D)
 
         # Temporal smoothing: suppress high-frequency jerk introduced by steering.
         if self.smooth_kernel > 1:
@@ -409,12 +464,11 @@ class FlowSteerer:
                 grad = grad.clone()
                 grad[:, length:, :] = 0.0
 
-            grad_flat = grad.view(B, -1)
             if self.grad_clip < float("inf"):
-                grad_flat = grad_flat.clamp(-self.grad_clip, self.grad_clip)
+                grad = grad.clamp(-self.grad_clip, self.grad_clip)
 
-            grad_scaled = self._apply_soft_norm(grad_flat)
-            steering_i = -grad_scaled.view(B, T_max, D)
+            grad_scaled = self._normalize_grad(grad)              # (B, T_max, D)
+            steering_i = -grad_scaled
 
             if self.smooth_kernel > 1:
                 pad = self.smooth_kernel // 2
@@ -444,8 +498,10 @@ class FlowSteerer:
         steps: int = 50,
         grad_clip: float = 1.0,
         smooth_kernel: int = 7,
-        soft_norm_tau: float = 0.001,
+        soft_norm_tau: float = 0.1,
         use_unit_grad: bool = False,
+        max_steer_ratio: float = 0.3,
+        ema_momentum: float = 0.7,
         verbose: bool = False,
     ) -> "FlowSteerer":
         decoder = MotionDecoder.from_stats_dir(
@@ -464,5 +520,7 @@ class FlowSteerer:
             smooth_kernel=smooth_kernel,
             soft_norm_tau=soft_norm_tau,
             use_unit_grad=use_unit_grad,
+            max_steer_ratio=max_steer_ratio,
+            ema_momentum=ema_momentum,
             verbose=verbose,
         )

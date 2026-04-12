@@ -320,15 +320,16 @@ def run_eval(args):
         constraints      = build_constraints_for_prompt(prompt_cfg, args)
         terminal_targets = extract_terminal_targets(prompt_cfg, args)
 
-        # Pose-only: lower alpha + mid-late cosine window (t=[0.2, 0.95]).
-        # PoseConstraint is a local structural constraint; applying it in
-        # early ODE steps locks the global trajectory prematurely.
+        # Pose-only: late narrow cosine window (t=[0.5, 0.88]).
+        # Let the model settle global dynamics first (t<0.5), then apply
+        # pose steering in the refinement phase.  Ending at 0.88 avoids
+        # over-fitting the final ODE steps to the target pose.
         if set(constraint_types) == {"pose"}:
             scheduler = StagedScheduler(
                 alpha_max=args.alpha_pose,
                 mode="cosine",
-                t_start=0.2,
-                t_end=0.95,
+                t_start=0.5,
+                t_end=0.88,
             )
         elif args.scheduler == "staged":
             scheduler = StagedScheduler.make_staged(
@@ -352,6 +353,8 @@ def run_eval(args):
             smooth_kernel=args.smooth_kernel,
             soft_norm_tau=args.soft_norm_tau,
             use_unit_grad=args.use_unit_grad,
+            max_steer_ratio=args.max_steer_ratio,
+            ema_momentum=args.ema_momentum,
             verbose=args.verbose,
         )
 
@@ -603,13 +606,20 @@ def main():
     parser.add_argument("--smooth_kernel", type=int,  default=7,
                         help="Temporal smoothing window for steering vector (odd int). "
                              "Suppresses high-frequency jerk. Set to 1 to disable.")
-    parser.add_argument("--soft_norm_tau", type=float, default=0.001,
-                        help="τ for soft gradient normalization: scale = ‖g‖/(‖g‖+τ). "
-                             "Steering self-attenuates when constraint is nearly satisfied. "
-                             "Empirical ‖g‖≈0.003 over T×D dims → default 0.001.")
+    parser.add_argument("--soft_norm_tau", type=float, default=0.1,
+                        help="τ (relative multiplier) for per-frame adaptive soft-norm. "
+                             "τ_abs = τ × median(‖g_frame‖).  Frames near keyframe get "
+                             "scale≈1; off-keyframe frames get scale≈0.  Default 0.1.")
     parser.add_argument("--use_unit_grad", action="store_true",
-                        help="[Ablation] Use original hard unit-norm gradient instead of "
-                             "soft normalization. Restores pre-fix behaviour.")
+                        help="[Ablation] Use per-frame unit-norm instead of adaptive "
+                             "soft-norm. Restores pre-fix behaviour.")
+    parser.add_argument("--max_steer_ratio", type=float, default=0.3,
+                        help="Trust region: per-frame ‖α·s‖ clamped to at most "
+                             "max_steer_ratio × ‖v‖.  Prevents steering from overriding "
+                             "model dynamics.  0.0 = disabled.  Default 0.3.")
+    parser.add_argument("--ema_momentum", type=float, default=0.7,
+                        help="EMA coefficient for steering direction across ODE steps. "
+                             "s_ema = μ·s_prev + (1-μ)·s_new.  0.0 = disabled.  Default 0.7.")
     parser.add_argument("--seeds",       default="42",
                         help="Comma-separated seed list (one motion per seed). "
                              "For Phase-1 eval use: 42,43,44")
