@@ -66,7 +66,7 @@ class FlowSteerer:
         smooth_kernel:   temporal smoothing window (odd int, default 7)
         soft_norm_tau:   τ in soft-norm  scale = ‖g‖/(‖g‖+τ).
                          Larger τ → steering auto-attenuates sooner when loss is small.
-                         Default 0.1 (calibrated to typical gradient norms 0.1–0.3).
+                         Default 0.001 (calibrated: empirical ‖g‖≈0.003 over T×D dims).
                          Set use_unit_grad=True to bypass.
         use_unit_grad:   if True, use original unit-norm steering (ablation baseline).
                          Default False (soft-norm is recommended).
@@ -84,7 +84,7 @@ class FlowSteerer:
         steps: Optional[int] = None,
         grad_clip: float = 1.0,
         smooth_kernel: int = 7,
-        soft_norm_tau: float = 0.1,
+        soft_norm_tau: float = 0.001,
         use_unit_grad: bool = False,
         verbose: bool = False,
     ):
@@ -444,7 +444,7 @@ class FlowSteerer:
         steps: int = 50,
         grad_clip: float = 1.0,
         smooth_kernel: int = 7,
-        soft_norm_tau: float = 0.1,
+        soft_norm_tau: float = 0.001,
         use_unit_grad: bool = False,
         verbose: bool = False,
     ) -> "FlowSteerer":

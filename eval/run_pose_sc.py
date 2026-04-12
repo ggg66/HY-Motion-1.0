@@ -340,8 +340,8 @@ def main():
                              "(overrides --alpha_pose; output_dir gets alpha suffix).")
     parser.add_argument("--steps",         type=int,   default=50)
     parser.add_argument("--smooth_kernel", type=int,   default=7)
-    parser.add_argument("--soft_norm_tau", type=float, default=0.1,
-                        help="τ for soft gradient normalization. Default 0.1.")
+    parser.add_argument("--soft_norm_tau", type=float, default=0.001,
+                        help="τ for soft gradient normalization. Default 0.001.")
     parser.add_argument("--use_unit_grad", action="store_true",
                         help="[Ablation] Use hard unit-norm gradient (pre-fix behaviour).")
     parser.add_argument("--cfg_scale",     type=float, default=5.0)
