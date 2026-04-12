@@ -101,6 +101,7 @@ class FlowSteerer:
         apply_latent_mask: bool = False,
         latent_mask_transl: float = 0.1,
         latent_mask_root_rot: float = 0.3,
+        use_temporal_mask: bool = True,
         verbose: bool = False,
     ):
         self.pipeline = pipeline
@@ -127,6 +128,7 @@ class FlowSteerer:
         self.apply_latent_mask = apply_latent_mask
         self.latent_mask_transl = latent_mask_transl
         self.latent_mask_root_rot = latent_mask_root_rot
+        self.use_temporal_mask = use_temporal_mask
         self.verbose = verbose
 
     # ------------------------------------------------------------------
@@ -431,9 +433,8 @@ class FlowSteerer:
             grad = grad.clamp(-self.grad_clip, self.grad_clip)
 
         # Temporal mask: focus gradient on frames near constraint keyframes.
-        # Frames far from any keyframe are attenuated so they don't receive
-        # spurious steering from the spatial gradient.
-        if hasattr(constraints, 'temporal_mask'):
+        # Controlled by use_temporal_mask (set False for ablation).
+        if self.use_temporal_mask and hasattr(constraints, 'temporal_mask'):
             tmask = constraints.temporal_mask(length, x.device)    # (length,) or None
             if tmask is not None:
                 grad[:, :length, :] = grad[:, :length, :] * tmask.view(1, length, 1)
@@ -514,7 +515,7 @@ class FlowSteerer:
                 grad = grad.clamp(-self.grad_clip, self.grad_clip)
 
             # Temporal mask from individual constraint
-            if hasattr(constraint, 'temporal_mask'):
+            if self.use_temporal_mask and hasattr(constraint, 'temporal_mask'):
                 tmask = constraint.temporal_mask(length, x.device)
                 if tmask is not None:
                     grad[:, :length, :] = grad[:, :length, :] * tmask.view(1, length, 1)
@@ -559,6 +560,7 @@ class FlowSteerer:
         apply_latent_mask: bool = False,
         latent_mask_transl: float = 0.1,
         latent_mask_root_rot: float = 0.3,
+        use_temporal_mask: bool = True,
         verbose: bool = False,
     ) -> "FlowSteerer":
         decoder = MotionDecoder.from_stats_dir(
@@ -582,5 +584,6 @@ class FlowSteerer:
             apply_latent_mask=apply_latent_mask,
             latent_mask_transl=latent_mask_transl,
             latent_mask_root_rot=latent_mask_root_rot,
+            use_temporal_mask=use_temporal_mask,
             verbose=verbose,
         )

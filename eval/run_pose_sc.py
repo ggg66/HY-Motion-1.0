@@ -255,6 +255,7 @@ def run_single(
         apply_latent_mask=args.apply_latent_mask,
         latent_mask_transl=args.latent_mask_transl,
         latent_mask_root_rot=args.latent_mask_root_rot,
+        use_temporal_mask=not args.no_temporal_mask,
     )
 
     # ---- 4. Steered generation (steer_seed toward target_seed's pose) ----
@@ -385,6 +386,8 @@ def main():
                         help="Attenuate steering on transl/root_rot latent dims.")
     parser.add_argument("--latent_mask_transl",   type=float, default=0.1)
     parser.add_argument("--latent_mask_root_rot", type=float, default=0.3)
+    parser.add_argument("--no_temporal_mask", action="store_true",
+                        help="[Ablation] Disable temporal Gaussian mask on gradients.")
     parser.add_argument("--target_seed",  type=int, default=42,
                         help="Seed used to generate the reference pose target. "
                              "Must differ from steer seeds. Default 42.")
