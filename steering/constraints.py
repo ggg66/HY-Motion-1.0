@@ -43,6 +43,17 @@ class BaseConstraint:
         """
         raise NotImplementedError
 
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        """
+        Return a (T,) soft window in [0, 1] indicating where this constraint
+        should focus its gradient energy.  Frames with low weight are masked
+        before normalization so they don't receive spurious steering.
+
+        Default: None (no masking — uniform over all valid frames).
+        Override in subclasses with time-localised constraints.
+        """
+        return None
+
 
 # ---------------------------------------------------------------------------
 # CompositeConstraint
@@ -88,6 +99,15 @@ class CompositeConstraint(BaseConstraint):
                 l = l / (l.detach() + 1e-8)
             total = total + w * l
         return total
+
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        """Aggregate sub-constraint masks by element-wise maximum."""
+        mask = None
+        for c, _ in self.constraints:
+            m = c.temporal_mask(T, device)
+            if m is not None:
+                mask = m if mask is None else torch.maximum(mask, m)
+        return mask
 
     def __call__(self, joints: Tensor) -> Tensor:
         return self.loss(joints)
@@ -369,6 +389,22 @@ class WaypointConstraint(BaseConstraint):
 
         return total
 
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        """
+        (T,) soft window in [0, 1]: element-wise max of Gaussians around each waypoint.
+
+        Focuses gradient energy near the time of each waypoint, suppressing
+        spurious steering updates at frames that are far from any constraint target.
+        """
+        sigma = max(1.0, self.sigma_frac * T)
+        t_idx = torch.arange(T, device=device, dtype=torch.float32)
+        mask  = torch.zeros(T, device=device)
+        for t_norm, _ in self.waypoints:
+            t_frame = float(t_norm) * (T - 1)
+            w = torch.exp(-0.5 * ((t_idx - t_frame) / sigma) ** 2)
+            mask = torch.maximum(mask, w)
+        return mask
+
 
 # ---------------------------------------------------------------------------
 # PoseConstraint  (L_pose)
@@ -383,6 +419,22 @@ UPPER_BODY_JOINTS = [3, 6, 9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
 LOWER_BODY_JOINTS = [1, 2, 4, 5, 7, 8, 10, 11]
 ARM_JOINTS        = [16, 17, 18, 19, 20, 21]
 LEG_JOINTS        = [1, 2, 4, 5, 7, 8, 10, 11]
+
+# Hierarchical joint groupings for weighted pose loss
+TORSO_JOINTS        = [0, 3, 6, 9, 12, 15]           # Pelvis, Spine1-3, Neck, Head
+LIMB_JOINTS         = [1, 2, 4, 5, 7, 8, 10, 11]     # Hips, Knees, Ankles, Feet
+END_EFFECTOR_JOINTS = [10, 11, 20, 21]               # Feet, Wrists
+
+# Per-joint importance weights for hierarchical pose loss (SMPL-H 22-joint)
+# Torso/spine: low (global shape rarely the target of pose constraints)
+# Upper limb end-effectors (shoulders, elbows, wrists): high
+# Lower end-effectors (ankles, feet): medium-high
+import torch as _torch
+_HIER_WEIGHTS_22: Tensor = _torch.ones(22)
+_HIER_WEIGHTS_22[[0, 3, 6, 9, 12, 15]] = 0.5           # torso/spine
+_HIER_WEIGHTS_22[[16, 17, 18, 19, 20, 21]] = 3.0        # shoulders, elbows, wrists
+_HIER_WEIGHTS_22[[7, 8, 10, 11]] = 2.0                  # ankles, feet
+del _torch
 
 
 class PoseConstraint(BaseConstraint):
@@ -434,14 +486,16 @@ class PoseConstraint(BaseConstraint):
         facing_weight: float = 0.0,
         weight: float = 1.0,
         mode: str = "canonical",
+        use_hierarchical: bool = False,
     ):
         assert mode in ("canonical", "world"), f"Unknown PoseConstraint mode: {mode!r}"
-        self.keyframes      = [(float(t), kf.float()) for t, kf in keyframes]
-        self.joint_mask     = joint_mask
-        self.sigma_frac     = sigma_frac
-        self.facing_weight  = facing_weight
-        self.weight         = weight
-        self.mode           = mode
+        self.keyframes        = [(float(t), kf.float()) for t, kf in keyframes]
+        self.joint_mask       = joint_mask
+        self.sigma_frac       = sigma_frac
+        self.facing_weight    = facing_weight
+        self.weight           = weight
+        self.mode             = mode
+        self.use_hierarchical = use_hierarchical
 
     # ------------------------------------------------------------------
     # Canonicalization helpers
@@ -551,10 +605,20 @@ class PoseConstraint(BaseConstraint):
                 pose_m   = pose_seq                                    # (B, T, 22, 3)
                 target_m = target                                      # (22, 3)
 
-            # Weighted pose MSE over time
-            diff       = (pose_m - target_m[None, None]) ** 2        # (B, T, J, 3)
-            frame_loss = diff.mean(dim=(-2, -1))                      # (B, T)
-            total      = total + (w * frame_loss).sum(dim=1).mean()   # scalar
+            # Per-joint squared error, averaged over xyz
+            diff          = (pose_m - target_m[None, None]) ** 2     # (B, T, J, 3)
+            per_joint_mse = diff.mean(dim=-1)                         # (B, T, J)
+
+            # Hierarchical weighting: wrists/elbows/shoulders high, torso low
+            if self.use_hierarchical:
+                joint_indices = self.joint_mask if self.joint_mask is not None \
+                    else list(range(22))
+                jw = _HIER_WEIGHTS_22[joint_indices].to(device)       # (J,)
+                frame_loss = (jw * per_joint_mse).sum(dim=-1) / jw.sum()  # (B, T)
+            else:
+                frame_loss = per_joint_mse.mean(dim=-1)               # (B, T)
+
+            total = total + (w * frame_loss).sum(dim=1).mean()        # scalar
 
             # Optional yaw-alignment term
             if self.facing_weight > 0.0 and self.mode == "canonical":
@@ -562,3 +626,20 @@ class PoseConstraint(BaseConstraint):
                 total     = total + self.facing_weight * (w * face_loss).sum()
 
         return total
+
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        """
+        (T,) soft window in [0, 1]: element-wise max of Gaussians around each keyframe.
+
+        Focuses gradient energy near keyframe positions; frames far from every
+        keyframe are attenuated so they don't receive spurious pose steering.
+        The Gaussian width matches sigma_frac used in the loss itself.
+        """
+        sigma = max(1.0, self.sigma_frac * T)
+        t_idx = torch.arange(T, device=device, dtype=torch.float32)
+        mask  = torch.zeros(T, device=device)
+        for t_norm, _ in self.keyframes:
+            t_frame = float(t_norm) * (T - 1)
+            w = torch.exp(-0.5 * ((t_idx - t_frame) / sigma) ** 2)
+            mask = torch.maximum(mask, w)
+        return mask

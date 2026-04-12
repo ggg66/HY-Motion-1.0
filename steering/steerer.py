@@ -65,7 +65,7 @@ class FlowSteerer:
         grad_clip:        elementwise clip for raw gradient (default 1.0)
         smooth_kernel:    temporal smoothing window (odd int, default 7)
         soft_norm_tau:    τ in per-frame adaptive soft-norm.
-                          Now a *relative* multiplier: τ_abs = τ × median(‖g_frame‖).
+                          Relative multiplier: τ_abs = τ × mean(‖g_frame‖).
                           scale = ‖g_frame‖ / (‖g_frame‖ + τ_abs) per frame.
                           Frames near keyframe (large gradient) → scale ≈ 1.
                           Frames far from keyframe (small gradient) → scale ≈ 0.
@@ -98,6 +98,9 @@ class FlowSteerer:
         use_unit_grad: bool = False,
         max_steer_ratio: float = 0.3,
         ema_momentum: float = 0.7,
+        apply_latent_mask: bool = False,
+        latent_mask_transl: float = 0.1,
+        latent_mask_root_rot: float = 0.3,
         verbose: bool = False,
     ):
         self.pipeline = pipeline
@@ -121,6 +124,9 @@ class FlowSteerer:
         self.use_unit_grad = use_unit_grad
         self.max_steer_ratio = max_steer_ratio
         self.ema_momentum = ema_momentum
+        self.apply_latent_mask = apply_latent_mask
+        self.latent_mask_transl = latent_mask_transl
+        self.latent_mask_root_rot = latent_mask_root_rot
         self.verbose = verbose
 
     # ------------------------------------------------------------------
@@ -326,13 +332,15 @@ class FlowSteerer:
             unit = g / ‖g‖  per frame  (hard unit-norm, ablation)
 
         use_unit_grad=False  (default):
-            Adaptive soft-norm with τ relative to per-sample median frame-norm:
-                τ_abs  = soft_norm_tau × median_t(‖g_frame‖)   (B, 1, 1)
-                scale  = ‖g_frame‖ / (‖g_frame‖ + τ_abs)       (B, T, 1)
+            Adaptive soft-norm with τ relative to per-sample mean frame-norm:
+                τ_abs  = soft_norm_tau × mean_t(‖g_frame‖)   (B, 1, 1)
+                scale  = ‖g_frame‖ / (‖g_frame‖ + τ_abs)     (B, T, 1)
                 output = scale × unit
             Keyframe frames (‖g‖ >> τ_abs): scale ≈ 1  → full strength
             Off-keyframe frames (‖g‖ << τ_abs): scale ≈ 0  → suppressed
-            soft_norm_tau is now a *relative* multiplier, not an absolute threshold.
+            Mean (not median) is used so sparse gradients (single keyframe) don't
+            push τ_abs → 0 and disable the soft-norm entirely.
+            soft_norm_tau is a *relative* multiplier, not an absolute threshold.
         """
         B, T, D = grad.shape
         grad_norm = grad.norm(dim=-1, keepdim=True).clamp(min=1e-8)   # (B, T, 1)
@@ -341,11 +349,38 @@ class FlowSteerer:
         if self.use_unit_grad:
             return unit
 
-        # Adaptive τ: relative to this step's median frame-norm (per sample)
-        median_norm = grad_norm.detach().median(dim=1, keepdim=True).values.clamp(min=1e-8)
-        tau_abs = self.soft_norm_tau * median_norm                     # (B, 1, 1)
+        # Adaptive τ: relative to this step's mean frame-norm (per sample).
+        # Mean (not median) is robust for sparse gradients: when only a few frames
+        # have large gradients (e.g. single keyframe), median → 0 which disables
+        # the soft-norm entirely.  Mean stays proportional to the average gradient
+        # magnitude across active frames.
+        mean_norm = grad_norm.detach().mean(dim=1, keepdim=True).clamp(min=1e-8)
+        tau_abs = self.soft_norm_tau * mean_norm                       # (B, 1, 1)
         scale = grad_norm / (grad_norm + tau_abs)                      # (B, T, 1)
         return scale * unit
+
+    def _apply_latent_mask(self, grad: Tensor) -> Tensor:
+        """
+        Per-dimension trust mask: limit pose steering's effect on transl/root_rot dims.
+
+        The motion latent layout (201D):
+            dims [0:3]   translation (world XYZ)
+            dims [3:9]   root rotation (6D)
+            dims [9:135] body joint rotations
+            dims [135:]  other (contact, velocity, etc.)
+
+        Pose steering should primarily reshape joint rotations.  Allowing it to
+        freely push translation/root_rot dims causes position drift and yaw flips
+        that compete with WaypointConstraint / TerminalConstraint.
+        """
+        if not self.apply_latent_mask:
+            return grad
+        D = grad.shape[-1]
+        mask = grad.new_ones(D)
+        mask[0:3] = self.latent_mask_transl
+        mask[3:9] = self.latent_mask_root_rot
+        # dims [9:] remain 1.0
+        return grad * mask.view(1, 1, D)
 
     def _compute_steering(
         self,
@@ -394,6 +429,17 @@ class FlowSteerer:
         # collapse the steering direction into a single dimension.
         if self.grad_clip < float("inf"):
             grad = grad.clamp(-self.grad_clip, self.grad_clip)
+
+        # Temporal mask: focus gradient on frames near constraint keyframes.
+        # Frames far from any keyframe are attenuated so they don't receive
+        # spurious steering from the spatial gradient.
+        if hasattr(constraints, 'temporal_mask'):
+            tmask = constraints.temporal_mask(length, x.device)    # (length,) or None
+            if tmask is not None:
+                grad[:, :length, :] = grad[:, :length, :] * tmask.view(1, length, 1)
+
+        # Latent trust mask: limit steering on translation / root-rotation dims.
+        grad = self._apply_latent_mask(grad)
 
         # Per-frame normalization — see _normalize_grad docstring.
         # Replaces the old sample-level flat normalization: keyframe-adjacent
@@ -467,6 +513,14 @@ class FlowSteerer:
             if self.grad_clip < float("inf"):
                 grad = grad.clamp(-self.grad_clip, self.grad_clip)
 
+            # Temporal mask from individual constraint
+            if hasattr(constraint, 'temporal_mask'):
+                tmask = constraint.temporal_mask(length, x.device)
+                if tmask is not None:
+                    grad[:, :length, :] = grad[:, :length, :] * tmask.view(1, length, 1)
+
+            grad = self._apply_latent_mask(grad)
+
             grad_scaled = self._normalize_grad(grad)              # (B, T_max, D)
             steering_i = -grad_scaled
 
@@ -502,6 +556,9 @@ class FlowSteerer:
         use_unit_grad: bool = False,
         max_steer_ratio: float = 0.3,
         ema_momentum: float = 0.7,
+        apply_latent_mask: bool = False,
+        latent_mask_transl: float = 0.1,
+        latent_mask_root_rot: float = 0.3,
         verbose: bool = False,
     ) -> "FlowSteerer":
         decoder = MotionDecoder.from_stats_dir(
@@ -522,5 +579,8 @@ class FlowSteerer:
             use_unit_grad=use_unit_grad,
             max_steer_ratio=max_steer_ratio,
             ema_momentum=ema_momentum,
+            apply_latent_mask=apply_latent_mask,
+            latent_mask_transl=latent_mask_transl,
+            latent_mask_root_rot=latent_mask_root_rot,
             verbose=verbose,
         )

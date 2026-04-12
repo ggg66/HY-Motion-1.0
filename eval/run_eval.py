@@ -162,6 +162,89 @@ _JOINT_MASK_MAP: Dict[str, Optional[List[int]]] = {
     "legs":       LEG_JOINTS,
 }
 
+# Default ODE-time windows for each constraint type in timed-composite mode.
+# (t_start, t_end, weight)
+# These encode the heterogeneous staged steering schedule:
+#   waypoint/terminal: early-mid  [0.15, 0.65] — establish path/destination
+#   pose:              mid-late   [0.50, 0.88] — refine body configuration
+#   foot_contact:      late       [0.72, 1.0]  — enforce physical stability
+_DEFAULT_TIMED_WINDOWS: Dict[str, tuple] = {
+    "foot_contact": (0.72, 1.0,  1.0),
+    "terminal":     (0.15, 0.65, 1.5),
+    "waypoint":     (0.15, 0.65, 1.0),
+    "pose":         (0.50, 0.88, 1.0),
+}
+
+
+def build_timed_constraints_for_prompt(prompt_cfg: Dict, args) -> List[tuple]:
+    """
+    Build a timed-composite constraint list for the heterogeneous staged steering path.
+
+    Returns:
+        list of (BaseConstraint, weight, t_start, t_end) tuples.
+
+    Time windows are read from the prompt's "timed" field (if present), with fallback
+    to _DEFAULT_TIMED_WINDOWS.  The "timed" field maps constraint type → dict with
+    optional keys: t_start, t_end, weight.
+
+    Example prompt JSON:
+        {
+            "prompt": "...",
+            "constraint": ["foot_contact", "pose", "waypoint"],
+            "timed": {
+                "pose":         {"t_start": 0.45, "t_end": 0.90, "weight": 1.2},
+                "foot_contact": {"t_start": 0.70, "t_end": 1.0,  "weight": 1.0}
+            }
+        }
+    """
+    constraint_types = prompt_cfg.get("constraint", args.constraint)
+    timed_overrides  = prompt_cfg.get("timed", {})
+    result = []
+
+    for ctype in constraint_types:
+        defaults = _DEFAULT_TIMED_WINDOWS.get(ctype, (0.0, 1.0, 1.0))
+        ov       = timed_overrides.get(ctype, {})
+        t_start  = float(ov.get("t_start", defaults[0]))
+        t_end    = float(ov.get("t_end",   defaults[1]))
+        weight   = float(ov.get("weight",  defaults[2]))
+
+        if ctype == "foot_contact":
+            c = FootContactConstraint(
+                height_thresh=0.05, vel_thresh=0.02,
+                detach_mask=not args.no_detach_mask,
+            )
+        elif ctype == "terminal":
+            xz     = prompt_cfg.get("terminal_xz", [args.terminal_x, args.terminal_z])
+            target = torch.tensor([[xz[0], 0.9, xz[1]]], dtype=torch.float32)
+            c      = TerminalConstraint(target_joints=target, joint_indices=[0], tail_frames=4)
+        elif ctype == "waypoint":
+            raw_wps = prompt_cfg.get("waypoints", [])
+            wps = [(float(w["t_norm"]),
+                    torch.tensor(w["xz"], dtype=torch.float32))
+                   for w in raw_wps]
+            c   = WaypointConstraint(wps, sigma_frac=0.05)
+        elif ctype == "pose":
+            raw_kfs   = prompt_cfg.get("pose_keyframes", [])
+            keyframes = []
+            for kf in raw_kfs:
+                target_np = np.load(kf["target_file"])
+                target    = torch.from_numpy(target_np).float()
+                keyframes.append((float(kf["t_norm"]), target))
+            mask_key      = raw_kfs[0].get("joint_mask", "upper_body") if raw_kfs else "upper_body"
+            joint_mask    = _JOINT_MASK_MAP.get(mask_key, None)
+            sigma_frac    = raw_kfs[0].get("sigma_frac", 0.04) if raw_kfs else 0.04
+            c = PoseConstraint(
+                keyframes, joint_mask=joint_mask, sigma_frac=sigma_frac,
+                use_hierarchical=args.use_hierarchical,
+            )
+        else:
+            continue
+
+        result.append((c, weight, t_start, t_end))
+
+    assert result, f"No timed constraints for prompt: {prompt_cfg['prompt']}"
+    return result
+
 
 def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
     """
@@ -207,7 +290,10 @@ def build_constraints_for_prompt(prompt_cfg: Dict, args) -> CompositeConstraint:
         mask_key   = raw_kfs[0].get("joint_mask", "upper_body") if raw_kfs else "upper_body"
         joint_mask = _JOINT_MASK_MAP.get(mask_key, None)
         sigma_frac = raw_kfs[0].get("sigma_frac", 0.04) if raw_kfs else 0.04
-        pc = PoseConstraint(keyframes, joint_mask=joint_mask, sigma_frac=sigma_frac)
+        pc = PoseConstraint(
+            keyframes, joint_mask=joint_mask, sigma_frac=sigma_frac,
+            use_hierarchical=args.use_hierarchical,
+        )
         constraint_list.append((pc, 1.0))
 
     assert constraint_list, f"No constraints for prompt: {prompt_cfg['prompt']}"
@@ -315,48 +401,70 @@ def run_eval(args):
         duration = prompt_cfg.get("duration", 3.0)
         print(f"\n[{global_idx}/{len(prompts)}] {prompt!r}  ({duration}s)")
 
-        # --- Build constraints and scheduler (Stage 1 config) ---
+        # --- Build constraints ---
         constraint_types = prompt_cfg.get("constraint", args.constraint)
-        constraints      = build_constraints_for_prompt(prompt_cfg, args)
         terminal_targets = extract_terminal_targets(prompt_cfg, args)
 
-        # Pose-only: late narrow cosine window (t=[0.5, 0.88]).
-        # Let the model settle global dynamics first (t<0.5), then apply
-        # pose steering in the refinement phase.  Ending at 0.88 avoids
-        # over-fitting the final ODE steps to the target pose.
-        if set(constraint_types) == {"pose"}:
-            scheduler = StagedScheduler(
-                alpha_max=args.alpha_pose,
-                mode="cosine",
-                t_start=0.5,
-                t_end=0.88,
+        if args.no_timed:
+            # Legacy static path (ablation / backward compat)
+            constraints = build_constraints_for_prompt(prompt_cfg, args)
+            if set(constraint_types) == {"pose"}:
+                scheduler = StagedScheduler(
+                    alpha_max=args.alpha_pose, mode="cosine", t_start=0.5, t_end=0.88,
+                )
+            elif args.scheduler == "staged":
+                scheduler = StagedScheduler.make_staged(
+                    alpha_terminal=args.alpha_terminal,
+                    alpha_waypoint=args.alpha_terminal,
+                    alpha_contact=args.alpha_contact,
+                )
+            elif args.scheduler == "constant":
+                scheduler = StagedScheduler.constant(alpha_max=args.alpha_terminal)
+            elif args.scheduler == "cosine":
+                scheduler = StagedScheduler.cosine(alpha_max=args.alpha_terminal)
+            else:
+                raise ValueError(f"Unknown scheduler: {args.scheduler}")
+            steerer = FlowSteerer(
+                pipeline=pipeline, decoder=decoder,
+                constraints=constraints, scheduler=scheduler,
+                steps=args.steps, smooth_kernel=args.smooth_kernel,
+                soft_norm_tau=args.soft_norm_tau, use_unit_grad=args.use_unit_grad,
+                max_steer_ratio=args.max_steer_ratio, ema_momentum=args.ema_momentum,
+                apply_latent_mask=args.apply_latent_mask,
+                latent_mask_transl=args.latent_mask_transl,
+                latent_mask_root_rot=args.latent_mask_root_rot,
+                verbose=args.verbose,
             )
-        elif args.scheduler == "staged":
-            scheduler = StagedScheduler.make_staged(
-                alpha_terminal=args.alpha_terminal,
-                alpha_waypoint=args.alpha_terminal,
-                alpha_contact=args.alpha_contact,
-            )
-        elif args.scheduler == "constant":
-            scheduler = StagedScheduler.constant(alpha_max=args.alpha_terminal)
-        elif args.scheduler == "cosine":
-            scheduler = StagedScheduler.cosine(alpha_max=args.alpha_terminal)
         else:
-            raise ValueError(f"Unknown scheduler: {args.scheduler}")
+            # Timed-composite path (default): heterogeneous staged steering.
+            # waypoint/terminal [0.15,0.65] → pose [0.50,0.88] → foot [0.72,1.0]
+            # A single cosine StagedScheduler controls global alpha magnitude;
+            # individual constraint time windows gate which constraints are active.
+            timed_constraints = build_timed_constraints_for_prompt(prompt_cfg, args)
 
-        steerer = FlowSteerer(
-            pipeline=pipeline,
-            decoder=decoder,
-            constraints=constraints,
-            scheduler=scheduler,
-            steps=args.steps,
-            smooth_kernel=args.smooth_kernel,
-            soft_norm_tau=args.soft_norm_tau,
-            use_unit_grad=args.use_unit_grad,
-            max_steer_ratio=args.max_steer_ratio,
-            ema_momentum=args.ema_momentum,
-            verbose=args.verbose,
-        )
+            # Pick alpha scale based on dominant constraint type
+            if set(constraint_types) == {"pose"}:
+                alpha_max = args.alpha_pose
+            elif "foot_contact" in constraint_types and not any(
+                c in constraint_types for c in ("terminal", "waypoint", "pose")
+            ):
+                alpha_max = args.alpha_contact
+            else:
+                alpha_max = args.alpha_terminal
+
+            scheduler = StagedScheduler.cosine(alpha_max=alpha_max)
+
+            steerer = FlowSteerer(
+                pipeline=pipeline, decoder=decoder,
+                timed_constraints=timed_constraints, scheduler=scheduler,
+                steps=args.steps, smooth_kernel=args.smooth_kernel,
+                soft_norm_tau=args.soft_norm_tau, use_unit_grad=args.use_unit_grad,
+                max_steer_ratio=args.max_steer_ratio, ema_momentum=args.ema_momentum,
+                apply_latent_mask=args.apply_latent_mask,
+                latent_mask_transl=args.latent_mask_transl,
+                latent_mask_root_rot=args.latent_mask_root_rot,
+                verbose=args.verbose,
+            )
 
         # ---- Baseline (no steering) ----
         t0 = time.time()
@@ -598,18 +706,32 @@ def main():
                         help="Steering strength for foot-contact constraint "
                              "(StagedScheduler stage [0.5,1.0]). "
                              "Keep lower than alpha_terminal to avoid jerk.")
-    parser.add_argument("--alpha_pose",    type=float, default=8.0,
-                        help="Steering strength for pose-only constraint. "
-                             "Much smaller than alpha_terminal because pose gradient "
-                             "is distributed across ~13 joints (vs 1 for terminal).")
+    parser.add_argument("--alpha_pose",    type=float, default=1.0,
+                        help="Steering strength for pose constraint (timed path: peak α for "
+                             "the global cosine schedule when pose-only; per-frame normalization "
+                             "is 14× stronger per-element than flat, so ~1.0 is correct operating "
+                             "point vs the legacy 8.0 with flat normalization).")
     parser.add_argument("--steps",        type=int,   default=50)
     parser.add_argument("--smooth_kernel", type=int,  default=7,
                         help="Temporal smoothing window for steering vector (odd int). "
                              "Suppresses high-frequency jerk. Set to 1 to disable.")
     parser.add_argument("--soft_norm_tau", type=float, default=0.1,
                         help="τ (relative multiplier) for per-frame adaptive soft-norm. "
-                             "τ_abs = τ × median(‖g_frame‖).  Frames near keyframe get "
+                             "τ_abs = τ × mean(‖g_frame‖).  Frames near keyframe get "
                              "scale≈1; off-keyframe frames get scale≈0.  Default 0.1.")
+    parser.add_argument("--no_timed",      action="store_true",
+                        help="[Ablation] Use legacy static-composite path instead of "
+                             "timed-composite heterogeneous staged steering (default: timed).")
+    parser.add_argument("--use_hierarchical", action="store_true",
+                        help="Enable hierarchical joint weighting in PoseConstraint: "
+                             "wrists/elbows/shoulders high (3×), torso low (0.5×), others 1×.")
+    parser.add_argument("--apply_latent_mask", action="store_true",
+                        help="Apply latent trust mask: attenuate steering on transl/root_rot "
+                             "dims to avoid position drift and yaw flips from pose steering.")
+    parser.add_argument("--latent_mask_transl",   type=float, default=0.1,
+                        help="Scale for translation dims [0:3] under latent trust mask. Default 0.1.")
+    parser.add_argument("--latent_mask_root_rot", type=float, default=0.3,
+                        help="Scale for root-rotation dims [3:9] under latent trust mask. Default 0.3.")
     parser.add_argument("--use_unit_grad", action="store_true",
                         help="[Ablation] Use per-frame unit-norm instead of adaptive "
                              "soft-norm. Restores pre-fix behaviour.")
