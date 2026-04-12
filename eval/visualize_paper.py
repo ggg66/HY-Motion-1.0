@@ -1,22 +1,26 @@
 """
 Paper-quality figure generator for FlowSteer-Motion.
 
-Generates static PNG figures showing temporal frame sequences
-suitable for CVPR submission. Mirrors the style of HY-Motion Fig. 6:
-multiple evenly-spaced frames per row, rows = configurations, clean white
-background, color-coded bones, ground-plane grid.
+Generates static PNG figures suitable for CVPR submission.
+
+Layout philosophy
+-----------------
+- Each skeleton cell is independently centred on the current frame's pelvis
+  so the character fills the cell even in long travelling motions.
+- The keyframe column (★) uses a canonical pose view (root-centred,
+  yaw-aligned) so the pose comparison matches the evaluation metric exactly.
+  An optional ghost skeleton shows the constraint target.
+- Three bone-colour styles: "normal" (vivid), "muted" (greyed ablation row),
+  "target" (lighter reference row).
 
 Main API
 --------
 save_comparison_figure(row_specs, output_path, ...)
-    Renders n_frames evenly-spaced skeleton frames per row.
-    Rows are labeled on the left; keyframe column is starred (★).
-
-save_ablation_figure(row_specs, output_path, ...)
-    Identical layout but uses a muted color scheme for disabled components.
+save_multi_prompt_figure(prompts_data, output_path, ...)
 """
 from __future__ import annotations
 
+import math
 import os
 from typing import List, Optional, Tuple
 
@@ -24,34 +28,14 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from mpl_toolkits.mplot3d import Axes3D  # noqa: registers 3D projection
+from mpl_toolkits.mplot3d import Axes3D   # noqa: registers 3D projection
 
 
-# ── Skeleton definition (SMPL-H 22-joint) ────────────────────────────────────
+# ── Skeleton ──────────────────────────────────────────────────────────────────
 
 SMPL22_PARENTS = [
-    -1,   # 0  Pelvis
-     0,   # 1  L_Hip
-     0,   # 2  R_Hip
-     0,   # 3  Spine1
-     1,   # 4  L_Knee
-     2,   # 5  R_Knee
-     3,   # 6  Spine2
-     4,   # 7  L_Ankle
-     5,   # 8  R_Ankle
-     6,   # 9  Spine3
-     7,   # 10 L_Foot
-     8,   # 11 R_Foot
-     9,   # 12 Neck
-     9,   # 13 L_Collar
-     9,   # 14 R_Collar
-    12,   # 15 Head
-    13,   # 16 L_Shoulder
-    14,   # 17 R_Shoulder
-    16,   # 18 L_Elbow
-    17,   # 19 R_Elbow
-    18,   # 20 L_Wrist
-    19,   # 21 R_Wrist
+    -1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9,
+    12, 13, 14, 16, 17, 18, 19,
 ]
 BONES = [(i, p) for i, p in enumerate(SMPL22_PARENTS) if p >= 0]
 
@@ -60,12 +44,6 @@ _RIGHT = {2, 5, 8, 11, 14, 17, 19, 21}
 
 
 def _bone_colour(child: int, style: str = "normal") -> str:
-    """
-    style:
-        "normal"  – vivid blue/red/green
-        "muted"   – desaturated for ablation (disabled) rows
-        "target"  – lighter tint for target/reference rows
-    """
     if style == "muted":
         if child in _LEFT:  return "#99AACC"
         if child in _RIGHT: return "#CCAAAA"
@@ -74,73 +52,65 @@ def _bone_colour(child: int, style: str = "normal") -> str:
         if child in _LEFT:  return "#6699DD"
         if child in _RIGHT: return "#DD6666"
         return "#66BB66"
-    # normal
     if child in _LEFT:  return "#2255BB"
     if child in _RIGHT: return "#BB2222"
     return "#22AA22"
 
 
-_COLOURS = {
-    style: [_bone_colour(c, style) for c, _ in BONES]
-    for style in ("normal", "muted", "target")
-}
+def _colours(style: str) -> List[str]:
+    return [_bone_colour(c, style) for c, _ in BONES]
+
+_GHOST_COLOURS = ["#BBBBBB"] * len(BONES)
 
 
-# ── Sequence helpers ──────────────────────────────────────────────────────────
+# ── Pose helpers ──────────────────────────────────────────────────────────────
+
+def _canonicalize(joints22: np.ndarray) -> np.ndarray:
+    """
+    Root-centred + yaw-aligned canonical pose.
+    Mirrors eval/metrics.py::canonicalize_frame_np.
+    joints22: (22, 3)  →  (22, 3)
+    """
+    root = joints22[0]
+    centred = joints22 - root
+    hip_vec = joints22[2] - joints22[1]   # R_Hip - L_Hip
+    hx, hz  = hip_vec[0], hip_vec[2]
+    norm    = math.sqrt(hx**2 + hz**2) + 1e-6
+    fx, fz  = -hz / norm, hx / norm
+    yaw     = math.atan2(fx, fz)
+    cy, sy  = math.cos(yaw), math.sin(yaw)
+    x, y, z = centred[:, 0], centred[:, 1], centred[:, 2]
+    return np.stack([x * cy - z * sy, y, x * sy + z * cy], axis=-1)
+
 
 def normalize_sequence(joints: np.ndarray) -> np.ndarray:
     """
-    Normalize a motion sequence for display.
-    - XZ: centre on pelvis at frame 0 so trajectory starts at origin.
-    - Y:  shift so minimum foot height = 0.
-
-    Args:
-        joints: (T, 22, 3) world-space joint positions
-
-    Returns:
-        (T, 22, 3) normalized joint positions
+    Translate so frame-0 pelvis is at XZ=(0,0); shift Y so floor=0.
+    joints: (T, 22, 3)
     """
     j = joints.copy()
-    j[:, :, 0] -= j[0, 0, 0]   # pelvis X at frame 0 → 0
-    j[:, :, 2] -= j[0, 0, 2]   # pelvis Z at frame 0 → 0
+    j[:, :, 0] -= j[0, 0, 0]
+    j[:, :, 2] -= j[0, 0, 2]
     floor = j[:, [7, 8, 10, 11], 1].min()
     j[:, :, 1] -= floor
     return j
 
 
-def _seq_bounds(
-    joints_list: List[np.ndarray],
-    margin: float = 0.25,
-) -> Tuple[Tuple[float, float], Tuple[float, float], Tuple[float, float]]:
-    """
-    Compute a shared (xlim, ylim, zlim) bounding box covering all sequences.
-    ylim is the depth axis (Z in world space).
-    """
-    all_j = np.concatenate(joints_list, axis=0)   # (total_T, 22, 3)
-    xs, ys, zs = all_j[:, :, 0], all_j[:, :, 1], all_j[:, :, 2]
-    xlim = (xs.min() - margin, xs.max() + margin)
-    ylim = (zs.min() - margin, zs.max() + margin)   # depth axis
-    zlim = (max(0.0, ys.min() - 0.05), ys.max() + 0.3)   # height axis
-    return xlim, ylim, zlim
-
-
-# ── Low-level draw helpers ────────────────────────────────────────────────────
+# ── Drawing helpers ───────────────────────────────────────────────────────────
 
 def _draw_skeleton(
     ax,
-    joints22: np.ndarray,       # (22, 3)
+    joints22: np.ndarray,      # (22, 3)  — world or canonical, already centred
     colours: List[str],
-    lw: float = 1.5,
+    lw: float = 1.6,
     alpha: float = 1.0,
     ms: float = 8.0,
 ) -> None:
-    """Draw one skeleton frame into a 3D axes (Y = height, Z = depth)."""
+    """Draw skeleton into a 3D axes (Y=height, Z=depth)."""
     for (child, par), col in zip(BONES, colours):
         p0, p1 = joints22[par], joints22[child]
         ax.plot(
-            [p0[0], p1[0]],   # X
-            [p0[2], p1[2]],   # Z → depth axis in the plot
-            [p0[1], p1[1]],   # Y → height axis in the plot
+            [p0[0], p1[0]], [p0[2], p1[2]], [p0[1], p1[1]],
             color=col, lw=lw, alpha=alpha, solid_capstyle="round",
         )
     ax.scatter(
@@ -150,39 +120,136 @@ def _draw_skeleton(
     )
 
 
-def _setup_axis(
-    ax,
-    xlim: Tuple[float, float],
-    ylim: Tuple[float, float],   # depth axis
-    zlim: Tuple[float, float],   # height axis
-    elev: float = 18,
-    azim: float = -70,
-) -> None:
-    """Configure 3D axis for paper-quality rendering."""
+def _setup_ax(ax, cx: float, cz: float, cy_floor: float,
+              half: float = 0.75, h_top: float = 2.1,
+              elev: float = 18, azim: float = -70,
+              canonical: bool = False) -> None:
+    """
+    Configure 3D axes centred at (cx, cz) in the XZ plane.
+    canonical=True uses a tighter window suitable for canonical pose comparison.
+    """
+    if canonical:
+        half = 0.65
+        h_top = 2.0
+    xlim = (cx - half, cx + half)
+    ylim = (cz - half, cz + half)
+    zlim = (cy_floor, cy_floor + h_top)
     ax.set_xlim(*xlim)
     ax.set_ylim(*ylim)
     ax.set_zlim(*zlim)
     ax.set_axis_off()
     ax.set_facecolor("white")
-    # Remove pane backgrounds
     for pane in (ax.xaxis.pane, ax.yaxis.pane, ax.zaxis.pane):
         pane.fill = False
         pane.set_edgecolor("none")
     ax.grid(False)
     ax.view_init(elev=elev, azim=azim)
-    # Ground-plane grid
+    # Ground grid
     for gx in np.linspace(xlim[0], xlim[1], 5):
-        ax.plot([gx, gx], [ylim[0], ylim[1]], [0, 0], color="#CCCCCC", lw=0.4)
+        ax.plot([gx, gx], [ylim[0], ylim[1]], [zlim[0], zlim[0]], color="#CCCCCC", lw=0.4)
     for gz in np.linspace(ylim[0], ylim[1], 5):
-        ax.plot([xlim[0], xlim[1]], [gz, gz], [0, 0], color="#CCCCCC", lw=0.4)
+        ax.plot([xlim[0], xlim[1]], [gz, gz], [zlim[0], zlim[0]], color="#CCCCCC", lw=0.4)
 
 
-# ── RowSpec type ──────────────────────────────────────────────────────────────
-# label:      row label shown on the left
-# joints:     (T, 22, 3) motion sequence
-# style:      bone colour style ("normal" | "muted" | "target")
-# t_norm:     keyframe position in [0,1]; used to mark the nearest column (None = no mark)
-RowSpec = Tuple[str, np.ndarray, str, Optional[float]]
+# ── RowSpec ───────────────────────────────────────────────────────────────────
+# (row_label, joints(T,22,3), style, t_norm|None, target_pose(22,3)|None)
+# target_pose: canonical target joint positions, shown as ghost at keyframe col
+RowSpec = Tuple[str, np.ndarray, str, Optional[float], Optional[np.ndarray]]
+
+
+# ── Core figure builder ───────────────────────────────────────────────────────
+
+def _render_rows(
+    fig,
+    row_specs: List[RowSpec],
+    n_frames: int,
+    cell_w: float,
+    cell_h: float,
+    label_w: float,
+    fig_w: float,
+    fig_h: float,
+    y_top_inch: float,    # distance from figure top to first row top (inches)
+    elev: float,
+    azim: float,
+    fps: int,
+) -> None:
+    """Render a block of rows into fig, starting at y_top_inch from the top."""
+    for row_idx, (label, joints, style, t_norm, target_pose) in enumerate(row_specs):
+        joints_n = normalize_sequence(joints)
+        T = joints_n.shape[0]
+        cols = _colours(style)
+
+        frame_idxs = [int(round(i * (T - 1) / (n_frames - 1))) for i in range(n_frames)]
+        kf_frame = int(round(t_norm * (T - 1))) if t_norm is not None else None
+        kf_col   = (
+            int(np.argmin([abs(fi - kf_frame) for fi in frame_idxs]))
+            if kf_frame is not None else None
+        )
+
+        for col_idx, fi in enumerate(frame_idxs):
+            is_kf = (kf_col is not None and col_idx == kf_col)
+
+            # ── Axes position ──────────────────────────────────────────────
+            row_top = y_top_inch + row_idx * cell_h
+            l = (label_w + col_idx * cell_w) / fig_w
+            b = 1.0 - (row_top + cell_h) / fig_h
+            w = cell_w / fig_w
+            h = cell_h / fig_h
+
+            ax = fig.add_axes([l, b, w, h], projection="3d")
+
+            if is_kf:
+                # ── Canonical view: removes root translation + rotation ─────
+                canon_frame = _canonicalize(joints_n[fi])
+                # Place so pelvis at Y=1 (aesthetic center), floor at 0
+                pelvis_y = joints_n[fi, 0, 1]  # current height of pelvis
+                canon_frame[:, 1] += pelvis_y  # restore height
+                floor_y = max(0.0, pelvis_y - 1.0)
+
+                _setup_ax(ax, cx=0.0, cz=0.0, cy_floor=floor_y,
+                          half=0.7, h_top=2.1,
+                          elev=elev, azim=azim, canonical=True)
+
+                # Ghost: target pose
+                if target_pose is not None:
+                    ghost = target_pose.copy()
+                    ghost[:, 1] += pelvis_y   # same height offset
+                    _draw_skeleton(ax, ghost, _GHOST_COLOURS, lw=1.1, alpha=0.45, ms=5)
+
+                _draw_skeleton(ax, canon_frame, cols, lw=1.8, alpha=1.0, ms=9)
+
+                # Subtle highlight background for canonical column
+                ax.patch.set_facecolor("#FFFBE6")
+                ax.patch.set_alpha(0.6)
+
+            else:
+                # ── World view: per-frame centred ──────────────────────────
+                px = joints_n[fi, 0, 0]   # pelvis X
+                pz = joints_n[fi, 0, 2]   # pelvis Z
+                floor_y = 0.0
+
+                _setup_ax(ax, cx=px, cz=pz, cy_floor=floor_y,
+                          half=0.75, h_top=2.1,
+                          elev=elev, azim=azim)
+                _draw_skeleton(ax, joints_n[fi], cols, lw=1.6, alpha=1.0, ms=8)
+
+            # ── Time label ─────────────────────────────────────────────────
+            t_sec = fi / fps
+            ax.text2D(0.5, 0.0, f"t={t_sec:.1f}s", transform=ax.transAxes,
+                      ha="center", va="bottom", fontsize=6.5, color="#777777")
+
+            # ── Keyframe star ──────────────────────────────────────────────
+            if is_kf:
+                ax.text2D(0.5, 1.01, "★", transform=ax.transAxes,
+                          ha="center", va="bottom", fontsize=10, color="#CC8800")
+
+        # ── Row label ───────────────────────────────────────────────────────
+        row_mid = y_top_inch + (row_idx + 0.5) * cell_h
+        lax = fig.add_axes([0.0, 1.0 - row_mid / fig_h, label_w / fig_w, 0.0])
+        lax.set_axis_off()
+        lax.text(0.95, 0.5, label, transform=lax.transAxes,
+                 ha="right", va="center", fontsize=9, fontweight="bold",
+                 color="#222222")
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -191,9 +258,9 @@ def save_comparison_figure(
     row_specs: List[RowSpec],
     output_path: str,
     n_frames: int = 7,
-    cell_w: float = 1.7,     # inches per skeleton cell
-    cell_h: float = 2.3,     # inches per row
-    label_w: float = 1.05,   # inches for row label column
+    cell_w: float = 1.7,
+    cell_h: float = 2.3,
+    label_w: float = 1.05,
     dpi: int = 200,
     elev: float = 18,
     azim: float = -70,
@@ -201,99 +268,36 @@ def save_comparison_figure(
     fps: int = 30,
 ) -> None:
     """
-    Generate a paper-style temporal frame-sequence comparison figure.
-
-    Each row shows n_frames evenly-spaced skeleton frames.  Rows share
-    a common bounding box and viewing angle for consistent comparison.
-    The column nearest the keyframe is marked with ★.
+    Single-prompt comparison figure.
 
     Args:
-        row_specs:    list of (label, joints(T,22,3), style, t_norm|None)
-            style choices: "normal" (vivid), "muted" (greyed-out), "target" (lighter)
-        output_path:  path to save PNG
-        n_frames:     number of frames to show per row (default 7)
-        cell_w/h:     subplot cell dimensions in inches
-        label_w:      row label column width in inches
-        dpi:          output resolution (200 for paper, 100 for draft)
-        elev, azim:   3D viewing angle
-        suptitle:     figure title (prompt text)
-        fps:          frames per second for time labels
+        row_specs: list of (label, joints(T,22,3), style, t_norm|None, target_pose(22,3)|None)
+            style: "normal" | "muted" | "target"
+            target_pose: optional canonical ghost skeleton shown at keyframe column
+        output_path: PNG output path
+        n_frames: frames per row (default 7)
+        dpi: 200 for paper, 100 for draft
+        suptitle: prompt text shown as figure title
     """
     n_rows = len(row_specs)
     fig_w  = label_w + n_frames * cell_w
-    fig_h  = cell_h * n_rows + (0.5 if suptitle else 0.1)
+    fig_h  = cell_h * n_rows + (0.45 if suptitle else 0.1)
 
     fig = plt.figure(figsize=(fig_w, fig_h), dpi=dpi)
     fig.patch.set_facecolor("white")
 
     if suptitle:
-        fig.text(
-            0.5, 1.0 - 0.1 / fig_h, f'"{suptitle}"',
-            ha="center", va="top", fontsize=9, fontstyle="italic",
-            color="#333333",
-        )
+        fig.text(0.5, 1.0 - 0.08 / fig_h, f'"{suptitle}"',
+                 ha="center", va="top", fontsize=9, fontstyle="italic",
+                 color="#333333")
 
-    # Normalise all sequences and build shared bounding box
-    normed_seqs = [normalize_sequence(joints) for _, joints, _, _ in row_specs]
-    xlim, ylim, zlim = _seq_bounds(normed_seqs)
-
-    for row_idx, ((label, joints, style, t_norm), joints_n) in enumerate(
-        zip(row_specs, normed_seqs)
-    ):
-        T = joints_n.shape[0]
-        cols = [_bone_colour(c, style) for c, _ in BONES]
-
-        # Evenly-spaced frame indices
-        frame_idxs = [int(round(i * (T - 1) / (n_frames - 1))) for i in range(n_frames)]
-
-        # Column closest to the keyframe
-        kf_frame = int(round(t_norm * (T - 1))) if t_norm is not None else None
-        kf_col   = (
-            int(np.argmin([abs(fi - kf_frame) for fi in frame_idxs]))
-            if kf_frame is not None else None
-        )
-
-        for col_idx, fi in enumerate(frame_idxs):
-            # Normalised axes bounds [0, 1] in figure space
-            l = (label_w + col_idx * cell_w) / fig_w
-            b = 1.0 - (row_idx + 1) * cell_h / fig_h
-            w = cell_w  / fig_w
-            h = cell_h  / fig_h
-
-            ax = fig.add_axes([l, b, w, h], projection="3d")
-            _setup_axis(ax, xlim, ylim, zlim, elev=elev, azim=azim)
-            _draw_skeleton(ax, joints_n[fi], cols, lw=1.8, alpha=1.0, ms=9)
-
-            # Time label
-            t_sec = fi / fps
-            ax.text2D(
-                0.5, 0.0, f"t={t_sec:.1f}s", transform=ax.transAxes,
-                ha="center", va="bottom", fontsize=6.5, color="#777777",
-            )
-
-            # Keyframe marker
-            if kf_col is not None and col_idx == kf_col:
-                ax.text2D(
-                    0.5, 1.01, "★", transform=ax.transAxes,
-                    ha="center", va="bottom", fontsize=10, color="#CC8800",
-                )
-
-        # Row label
-        lax = fig.add_axes(
-            [0.0, 1.0 - (row_idx + 0.5) * cell_h / fig_h, label_w / fig_w, 0.0]
-        )
-        lax.set_axis_off()
-        lax.text(
-            0.95, 0.5, label, transform=lax.transAxes,
-            ha="right", va="center", fontsize=9, fontweight="bold",
-            color="#222222",
-        )
+    y_top = 0.45 if suptitle else 0.1
+    _render_rows(fig, row_specs, n_frames, cell_w, cell_h, label_w,
+                 fig_w, fig_h, y_top, elev, azim, fps)
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    plt.savefig(
-        output_path, dpi=dpi, bbox_inches="tight",
-        facecolor="white", edgecolor="none",
-    )
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
     plt.close(fig)
     print(f"  Saved: {output_path}")
 
@@ -305,125 +309,52 @@ def save_multi_prompt_figure(
     cell_w: float = 1.55,
     cell_h: float = 2.0,
     label_w: float = 1.05,
-    prompt_h: float = 0.28,   # inches for prompt title row
+    prompt_h: float = 0.28,
     dpi: int = 200,
     elev: float = 18,
     azim: float = -70,
     fps: int = 30,
 ) -> None:
     """
-    Generate a combined multi-prompt comparison figure.
+    Multi-prompt stacked comparison figure.
 
-    Layout:
-        ┌─ Prompt A ─────────────────────────────────────┐
-        │  [Label] [f0] [f1] [f2] [f3★] [f4] [f5] [f6]  │  row A1
-        │  [Label] [f0] [f1] [f2] [f3★] [f4] [f5] [f6]  │  row A2
-        ├─ Prompt B ─────────────────────────────────────┤
-        │  ...                                            │
-        └────────────────────────────────────────────────┘
+    Each prompt block has a grey separator bar with the prompt text,
+    followed by its rows of skeleton sequences.
 
     Args:
-        prompts_data: list of (prompt_text, row_specs) — one entry per prompt
-        output_path:  output PNG path
-        n_frames:     frames per row
-        cell_w/h:     cell size in inches
-        label_w:      row label column width
-        prompt_h:     height of prompt title separator row
-        dpi:          output resolution
-        elev, azim:   3D viewing angle
-        fps:          frame rate for time labels
+        prompts_data: list of (prompt_text, row_specs)
+        prompt_h: height of the separator bar in inches
     """
-    # Total rows accounting for prompt separators
-    # Each prompt group contributes: 1 separator + len(rows) cell rows
     total_h = sum(
         prompt_h + len(rows) * cell_h
         for _, rows in prompts_data
-    ) + 0.1  # bottom margin
+    ) + 0.1
 
     fig_w = label_w + n_frames * cell_w
     fig = plt.figure(figsize=(fig_w, total_h), dpi=dpi)
     fig.patch.set_facecolor("white")
 
-    # Normalise all sequences and compute shared bounding box
-    all_normed: List[np.ndarray] = []
-    for _, row_specs in prompts_data:
-        for _, joints, _, _ in row_specs:
-            all_normed.append(normalize_sequence(joints))
+    y_offset = 0.0
 
-    xlim, ylim, zlim = _seq_bounds(all_normed)
-
-    # Track current top offset as a fraction of figure height
-    normed_iter = iter(all_normed)
-    y_offset = 0.0   # cumulative from top (in inches)
-
-    for p_idx, (prompt_text, row_specs) in enumerate(prompts_data):
-        # ── Prompt separator ──────────────────────────────────────────────────
+    for prompt_text, row_specs in prompts_data:
+        # ── Separator bar ──────────────────────────────────────────────────
         sep_b = 1.0 - (y_offset + prompt_h) / total_h
-        sep_h = prompt_h / total_h
-        sep_ax = fig.add_axes([0.0, sep_b, 1.0, sep_h])
+        sep_ax = fig.add_axes([0.0, sep_b, 1.0, prompt_h / total_h])
+        sep_ax.set_facecolor("#F2F2F2")
         sep_ax.set_axis_off()
-        sep_ax.set_facecolor("#F0F0F0")
-        sep_ax.axhline(0.5, color="#CCCCCC", lw=0.5)
-        prompt_label = f'"{prompt_text}"' if len(prompt_text) < 70 else f'"{prompt_text[:67]}..."'
-        sep_ax.text(
-            0.02, 0.5, prompt_label,
-            transform=sep_ax.transAxes, ha="left", va="center",
-            fontsize=8.5, fontstyle="italic", color="#444444",
-        )
+        label_txt = f'"{prompt_text}"' if len(prompt_text) < 68 else f'"{prompt_text[:65]}…"'
+        sep_ax.text(0.015, 0.5, label_txt,
+                    transform=sep_ax.transAxes, ha="left", va="center",
+                    fontsize=8.5, fontstyle="italic", color="#444444")
         y_offset += prompt_h
 
-        for row_idx, (label, joints, style, t_norm) in enumerate(row_specs):
-            joints_n = next(normed_iter)
-            T = joints_n.shape[0]
-            cols = [_bone_colour(c, style) for c, _ in BONES]
-
-            frame_idxs = [int(round(i * (T - 1) / (n_frames - 1))) for i in range(n_frames)]
-            kf_frame = int(round(t_norm * (T - 1))) if t_norm is not None else None
-            kf_col   = (
-                int(np.argmin([abs(fi - kf_frame) for fi in frame_idxs]))
-                if kf_frame is not None else None
-            )
-
-            for col_idx, fi in enumerate(frame_idxs):
-                l = (label_w + col_idx * cell_w) / fig_w
-                b = 1.0 - (y_offset + cell_h) / total_h
-                w = cell_w   / fig_w
-                h = cell_h   / total_h
-
-                ax = fig.add_axes([l, b, w, h], projection="3d")
-                _setup_axis(ax, xlim, ylim, zlim, elev=elev, azim=azim)
-                _draw_skeleton(ax, joints_n[fi], cols, lw=1.6, alpha=1.0, ms=7)
-
-                t_sec = fi / fps
-                ax.text2D(
-                    0.5, 0.0, f"t={t_sec:.1f}s", transform=ax.transAxes,
-                    ha="center", va="bottom", fontsize=6, color="#777777",
-                )
-
-                if kf_col is not None and col_idx == kf_col:
-                    ax.text2D(
-                        0.5, 1.01, "★", transform=ax.transAxes,
-                        ha="center", va="bottom", fontsize=9, color="#CC8800",
-                    )
-
-            # Row label
-            lax = fig.add_axes(
-                [0.0, 1.0 - (y_offset + 0.5 * cell_h) / total_h,
-                 label_w / fig_w, 0.0]
-            )
-            lax.set_axis_off()
-            lax.text(
-                0.95, 0.5, label, transform=lax.transAxes,
-                ha="right", va="center", fontsize=8.5, fontweight="bold",
-                color="#222222",
-            )
-
-            y_offset += cell_h
+        # ── Skeleton rows ──────────────────────────────────────────────────
+        _render_rows(fig, row_specs, n_frames, cell_w, cell_h, label_w,
+                     fig_w, total_h, y_offset, elev, azim, fps)
+        y_offset += len(row_specs) * cell_h
 
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-    plt.savefig(
-        output_path, dpi=dpi, bbox_inches="tight",
-        facecolor="white", edgecolor="none",
-    )
+    plt.savefig(output_path, dpi=dpi, bbox_inches="tight",
+                facecolor="white", edgecolor="none")
     plt.close(fig)
     print(f"  Saved: {output_path}")

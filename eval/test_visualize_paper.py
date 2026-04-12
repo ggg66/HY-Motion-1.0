@@ -77,9 +77,9 @@ def main():
     # ── Test 1: single-prompt comparison figure ───────────────────────────────
     print("Test 1: save_comparison_figure ...")
     row_specs = [
-        ("Target\n(ref)", seq_tgt,    "target", 0.5),
-        ("Baseline",      seq_base,   "muted",  0.5),
-        ("Ours",          seq_ours,   "normal", 0.5),
+        ("Target\n(ref)", seq_tgt,    "target", 0.5, None),
+        ("Baseline",      seq_base,   "muted",  0.5, None),
+        ("Ours",          seq_ours,   "normal", 0.5, None),
     ]
     save_comparison_figure(
         row_specs,
@@ -97,9 +97,9 @@ def main():
             ("Ours",          seq_ours, "normal", 0.5),
         ]),
         ("a person does a hip-hop dance.", [
-            ("Target\n(ref)", seq_tgt,    "target", 0.4),
-            ("Baseline",      seq_base,   "muted",  0.4),
-            ("Ours",          seq_nomask, "normal", 0.4),
+            ("Target\n(ref)", seq_tgt,    "target", 0.4, None),
+            ("Baseline",      seq_base,   "muted",  0.4, None),
+            ("Ours",          seq_nomask, "normal", 0.4, None),
         ]),
     ]
     save_multi_prompt_figure(
@@ -112,8 +112,8 @@ def main():
     print("Test 3: ablation layout ...")
     ablation_data = [
         ("a person walks forward and stops", [
-            ("w/o latent\nmask", seq_nomask, "muted",  0.5),
-            ("Full\nmethod",     seq_ours,   "normal", 0.5),
+            ("w/o latent\nmask", seq_nomask, "muted",  0.5, None),
+            ("Full\nmethod",     seq_ours,   "normal", 0.5, None),
         ]),
     ]
     save_multi_prompt_figure(

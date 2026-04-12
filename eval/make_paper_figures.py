@@ -254,10 +254,13 @@ def make_fig1_pose_comparison(
             force=force,
         )
 
+        # canonical target pose (22,3) for ghost overlay at keyframe column
+        target_pose_np = canonicalize_frame_np(tgt[kf])   # (22,3)
+
         row_specs: List[RowSpec] = [
-            ("Target\n(ref)", tgt,     "target", t_norm),
-            ("Baseline",      base,    "muted",  t_norm),
-            ("Ours",          steered, "normal", t_norm),
+            ("Target\n(ref)", tgt,     "target", t_norm, None),
+            ("Baseline",      base,    "muted",  t_norm, target_pose_np),
+            ("Ours",          steered, "normal", t_norm, target_pose_np),
         ]
         prompts_data.append((prompt, row_specs))
 
@@ -320,8 +323,8 @@ def make_fig2_ablation(
         )
 
         row_specs: List[RowSpec] = [
-            ("w/o latent\nmask", no_mask, "muted",  t_norm),
-            ("Full\nmethod",    full,    "normal", t_norm),
+            ("w/o latent\nmask", no_mask, "muted",  t_norm, None),
+            ("Full\nmethod",     full,    "normal", t_norm, None),
         ]
         prompts_data.append((prompt, row_specs))
 
@@ -388,8 +391,8 @@ def make_fig3_multiconstraint(
         )
 
         row_specs: List[RowSpec] = [
-            ("Pose only",     pose_only, "muted",  t_norm),
-            ("Pose + Foot",   pose_foot, "normal", t_norm),
+            ("Pose only",   pose_only, "muted",  t_norm, None),
+            ("Pose + Foot", pose_foot, "normal", t_norm, None),
         ]
         prompts_data.append((prompt, row_specs))
 
