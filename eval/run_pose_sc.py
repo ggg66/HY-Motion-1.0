@@ -165,10 +165,21 @@ def run_single(
     args,
 ) -> Dict:
     """
-    Run one self-consistency trial: baseline → extract target → steer → metrics.
+    Cross-seed self-consistency trial.
+
+    Protocol:
+        1. Generate baseline with target_seed  →  canonicalize pose at t_norm
+           → this is the constraint target (T).
+        2. Generate baseline with steer_seed   →  measure err_base = dist(pose, T).
+        3. Generate steered with steer_seed toward T  →  measure err_steer.
+        4. improvement = (err_base − err_steer) / err_base × 100 %.
+
+    Using different seeds for target vs steer ensures err_base > 0 and the
+    improvement metric is well-defined.  target_seed=42, steer_seed=43 by default
+    (set via args.target_seed / args.steer_seed).
 
     Returns a dict with keys:
-        seed, prompt, duration, variance,
+        target_seed, steer_seed, prompt, duration, variance,
         pose_hit_baseline, pose_hit_steered, pose_hit_improvement_pct,
         jerk_baseline, jerk_steered, jerk_ratio,
         kinvar_baseline, kinvar_steered, kinvar_ratio,
@@ -186,22 +197,31 @@ def run_single(
     joint_mask = _JOINT_MASK_MAP.get(mask_key, None)
     sigma_frac = float(kfs[0].get("sigma_frac", 0.04))
 
-    # ---- 1. Baseline (no steering) ----
+    target_seed = args.target_seed
+    steer_seed  = seed   # loop variable; default steer seeds are the non-target seeds
+
+    # ---- 1. Generate target-seed baseline → extract canonical pose as target ----
     with torch.no_grad():
-        base_out = pipeline.generate(
+        tgt_out = pipeline.generate(
             text=prompt,
-            seed_input=[seed],
+            seed_input=[target_seed],
             duration_slider=duration,
             cfg_scale=args.cfg_scale,
         )
-    base_joints = pipeline_output_to_world_joints(base_out)   # (1, T, 22, 3)
+    tgt_joints = pipeline_output_to_world_joints(tgt_out)   # (1, T, 22, 3)
+    target_np  = _extract_target(tgt_joints[0], t_norm)     # (22, 3)  canonical
+    target_t   = torch.from_numpy(target_np).float()
 
-    # ---- 2. Extract canonical pose target from this seed's baseline ----
-    target_np = _extract_target(base_joints[0], t_norm)        # (22, 3)
-    target_t  = torch.from_numpy(target_np).float()
-
-    # Compute baseline pose error (should be ~0 by construction)
-    err_base = _pose_hit_error(base_joints[0], t_norm, target_np, joint_mask)
+    # ---- 2. Generate steer-seed baseline → measure natural distance to target ----
+    with torch.no_grad():
+        base_out = pipeline.generate(
+            text=prompt,
+            seed_input=[steer_seed],
+            duration_slider=duration,
+            cfg_scale=args.cfg_scale,
+        )
+    base_joints = pipeline_output_to_world_joints(base_out)  # (1, T, 22, 3)
+    err_base    = _pose_hit_error(base_joints[0], t_norm, target_np, joint_mask)
 
     # ---- 3. Build PoseConstraint and scheduler ----
     pc = PoseConstraint(
@@ -237,10 +257,10 @@ def run_single(
         latent_mask_root_rot=args.latent_mask_root_rot,
     )
 
-    # ---- 4. Steered generation (same seed) ----
+    # ---- 4. Steered generation (steer_seed toward target_seed's pose) ----
     steer_out    = steerer.generate(
         text=prompt,
-        seed_input=[seed],
+        seed_input=[steer_seed],
         duration_slider=duration,
         cfg_scale=args.cfg_scale,
     )
@@ -248,16 +268,19 @@ def run_single(
 
     # ---- 5. Metrics ----
     err_steer   = _pose_hit_error(steer_joints[0], t_norm, target_np, joint_mask)
+    # err_base is the natural distance between steer_seed and target_seed poses.
+    # Dividing by err_base gives a well-defined improvement metric (no ÷0).
     improvement = (err_base - err_steer) / (err_base + 1e-8) * 100.0
 
     q_base  = compute_quality_metrics(base_joints)
     q_steer = compute_quality_metrics(steer_joints)
 
-    jerk_ratio  = q_steer.mean_jerk        / (q_base.mean_jerk        + 1e-9)
-    kinvar_ratio = q_steer.kinematic_variance / (q_base.kinematic_variance + 1e-9)
+    jerk_ratio   = q_steer.mean_jerk          / (q_base.mean_jerk          + 1e-9)
+    kinvar_ratio = q_steer.kinematic_variance  / (q_base.kinematic_variance + 1e-9)
 
     return {
-        "seed":                   seed,
+        "target_seed":            target_seed,
+        "steer_seed":             steer_seed,
         "prompt":                 prompt,
         "duration":               duration,
         "variance":               variance,
@@ -362,12 +385,23 @@ def main():
                         help="Attenuate steering on transl/root_rot latent dims.")
     parser.add_argument("--latent_mask_transl",   type=float, default=0.1)
     parser.add_argument("--latent_mask_root_rot", type=float, default=0.3)
+    parser.add_argument("--target_seed",  type=int, default=42,
+                        help="Seed used to generate the reference pose target. "
+                             "Must differ from steer seeds. Default 42.")
     parser.add_argument("--cfg_scale",     type=float, default=5.0)
     parser.add_argument("--gpu_id",        type=int,   default=0)
     args = parser.parse_args()
 
     device = torch.device(f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu")
     seeds  = [int(s) for s in args.seeds.split(",")]
+    # Exclude target_seed from steer seeds to guarantee cross-seed protocol.
+    if args.target_seed in seeds:
+        seeds = [s for s in seeds if s != args.target_seed]
+        if not seeds:
+            raise ValueError(
+                f"--seeds must contain at least one seed other than --target_seed={args.target_seed}"
+            )
+        print(f"[Note] Removed target_seed={args.target_seed} from steer seeds → {seeds}")
 
     if args.alpha_sweep is not None:
         alphas = [float(a) for a in args.alpha_sweep.split(",")]
@@ -376,7 +410,7 @@ def main():
 
     with open(args.prompt_file) as f:
         prompts = json.load(f)
-    print(f"Loaded {len(prompts)} prompts  seeds={seeds}  alphas={alphas}")
+    print(f"Loaded {len(prompts)} prompts  target_seed={args.target_seed}  steer_seeds={seeds}  alphas={alphas}")
 
     # --- Load pipeline + decoder ---
     print("Loading HY-Motion pipeline...")
@@ -399,7 +433,7 @@ def main():
 
         for p_idx, prompt_cfg in enumerate(prompts):
             for seed in seeds:
-                label = f"[{p_idx+1}/{len(prompts)}] seed={seed}  α={alpha}"
+                label = f"[{p_idx+1}/{len(prompts)}] tgt={args.target_seed}→steer={seed}  α={alpha}"
                 print(f"\n{label}  {prompt_cfg['prompt'][:50]!r}")
 
                 t0 = time.time()
@@ -414,8 +448,8 @@ def main():
 
         total_time = time.time() - t0_total
         print(f"\n{'='*70}")
-        print(f"  SELF-CONSISTENCY RESULTS  α={alpha}  "
-              f"({len(prompts)} prompts × {len(seeds)} seeds = {len(all_rows)} trials)")
+        print(f"  CROSS-SEED POSE RECOVERY  α={alpha}  tgt={args.target_seed}→steer={seeds}  "
+              f"({len(prompts)} prompts × {len(seeds)} steer-seeds = {len(all_rows)} trials)")
         print(f"  Total time: {total_time/60:.1f} min")
         print(f"{'='*70}")
 
