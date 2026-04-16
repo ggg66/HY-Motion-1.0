@@ -199,26 +199,36 @@ def _render_rows(
             ax = fig.add_axes([l, b, w, h], projection="3d")
 
             if is_kf:
-                # ── Canonical view: removes root translation + rotation ─────
+                # ── Canonical view: front-facing, removes root transl+rot ─────
                 canon_frame = _canonicalize(joints_n[fi])
-                # Place so pelvis at Y=1 (aesthetic center), floor at 0
-                pelvis_y = joints_n[fi, 0, 1]  # current height of pelvis
-                canon_frame[:, 1] += pelvis_y  # restore height
+                pelvis_y = joints_n[fi, 0, 1]
+                canon_frame[:, 1] += pelvis_y
                 floor_y = max(0.0, pelvis_y - 1.0)
 
+                # Front view: azim=-90 looks directly at the character's face,
+                # showing lateral (X) and vertical (Y) arm positions clearly.
                 _setup_ax(ax, cx=0.0, cz=0.0, cy_floor=floor_y,
-                          half=0.7, h_top=2.1,
-                          elev=elev, azim=azim, canonical=True)
+                          half=0.65, h_top=2.1,
+                          elev=10, azim=-90, canonical=True)
 
-                # Ghost: target pose
+                # Ghost: canonical target pose (prominent orange)
                 if target_pose is not None:
                     ghost = target_pose.copy()
-                    ghost[:, 1] += pelvis_y   # same height offset
-                    _draw_skeleton(ax, ghost, _GHOST_COLOURS, lw=1.1, alpha=0.45, ms=5)
+                    ghost[:, 1] += pelvis_y
+                    _draw_skeleton(ax, ghost, ["#FF8C00"] * len(BONES),
+                                   lw=1.4, alpha=0.55, ms=6)
 
-                _draw_skeleton(ax, canon_frame, cols, lw=1.8, alpha=1.0, ms=9)
+                # Actual skeleton on top
+                _draw_skeleton(ax, canon_frame, cols, lw=2.0, alpha=1.0, ms=10)
 
-                # Subtle highlight background for canonical column
+                # Highlight constrained joints (shoulders/elbows/wrists) with
+                # larger dots so the viewer knows exactly where to look
+                _CONSTRAINED = [16, 17, 18, 19, 20, 21]  # shoulders,elbows,wrists
+                cj = canon_frame[_CONSTRAINED]
+                ax.scatter(cj[:, 0], cj[:, 2], cj[:, 1],
+                           c="#FFDD00", edgecolors="#333333", s=55,
+                           zorder=10, linewidths=0.8)
+
                 ax.patch.set_facecolor("#FFFBE6")
                 ax.patch.set_alpha(0.6)
 
