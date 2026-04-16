@@ -61,31 +61,86 @@ _T_POSE     = (0.50, 0.88)
 _T_FOOT     = (0.72, 1.00)
 
 
-# ── Full 20-prompt benchmark (mirrors pose_eval_raw.json) ────────────────────
+# ── Expanded prompt pool (~60 prompts) ───────────────────────────────────────
+# Larger pool → better chance of finding visually compelling top-3 for paper.
 # (prompt_text, duration_s, t_norm, joint_mask_key)
 _ALL_PROMPTS = [
-    # low-variance
-    ("a person walks forward and stops",                            3.0, 0.5,  "upper_body"),
-    ("a person walks forward.",                                     4.0, 0.5,  "upper_body"),
-    ("a person runs forward.",                                      4.0, 0.4,  "upper_body"),
-    ("a person sprints forward.",                                   4.0, 0.5,  "arms"),
-    ("a person practices tai chi, performing slow circular movements.", 5.0, 0.3, "upper_body"),
+    # ── Locomotion ────────────────────────────────────────────────────────────
+    ("a person walks forward and stops",                                    3.0, 0.5,  "upper_body"),
+    ("a person walks forward.",                                             4.0, 0.5,  "upper_body"),
+    ("a person runs forward.",                                              4.0, 0.4,  "upper_body"),
+    ("a person sprints forward.",                                           4.0, 0.5,  "arms"),
+    ("a person skips forward.",                                             4.0, 0.5,  "all"),
+    ("a person marches in place, swinging their arms.",                     4.0, 0.4,  "arms"),
     ("a person walks forward, moving arms and legs while looking left and right.", 6.0, 0.5, "arms"),
-    ("a person marches in place, swinging their arms.",             4.0, 0.4,  "arms"),
-    ("a person lifts a long gun, then walks forward.",              5.0, 0.3,  "upper_body"),
-    ("a person skips forward.",                                     4.0, 0.5,  "all"),
-    # high-variance
-    ("a person dances.",                                            4.0, 0.3,  "upper_body"),
-    ("a person dances jazz, jumping rhythmically.",                 5.0, 0.5,  "upper_body"),
-    ("a person does a hip-hop dance.",                              4.0, 0.4,  "upper_body"),
-    ("a person does a salsa step.",                                 4.0, 0.5,  "upper_body"),
-    ("a person performs a breakdance toprock.",                     4.0, 0.5,  "arms"),
-    ("a person dances flamenco, stamping their feet.",              5.0, 0.4,  "upper_body"),
-    ("a person jumps upward with both legs together.",              3.0, 0.5,  "all"),
-    ("a person jumps up.",                                          3.0, 0.45, "all"),
-    ("a person performs a taekwondo kick, extending their leg.",    3.0, 0.5,  "all"),
-    ("a person performs a side kick.",                              3.0, 0.5,  "all"),
-    ("a person does a front kick followed by a punch.",             4.0, 0.35, "all"),
+    ("a person jogs in place.",                                             4.0, 0.4,  "arms"),
+    ("a person walks backward slowly.",                                     4.0, 0.5,  "upper_body"),
+    ("a person shuffles sideways to the left.",                             3.0, 0.5,  "arms"),
+    ("a person crawls forward on all fours.",                               4.0, 0.4,  "all"),
+    ("a person tiptoes forward quietly.",                                   4.0, 0.5,  "upper_body"),
+
+    # ── Jumps & acrobatics ───────────────────────────────────────────────────
+    ("a person jumps upward with both legs together.",                      3.0, 0.5,  "all"),
+    ("a person jumps up.",                                                  3.0, 0.45, "all"),
+    ("a person does a star jump, spreading arms and legs wide.",            3.0, 0.45, "all"),
+    ("a person leaps forward.",                                             3.0, 0.45, "all"),
+    ("a person does a standing long jump.",                                 3.0, 0.4,  "all"),
+    ("a person hops on one foot.",                                          3.0, 0.5,  "upper_body"),
+
+    # ── Martial arts / combat ────────────────────────────────────────────────
+    ("a person performs a taekwondo kick, extending their leg.",            3.0, 0.5,  "all"),
+    ("a person performs a side kick.",                                      3.0, 0.5,  "all"),
+    ("a person does a front kick followed by a punch.",                     4.0, 0.35, "all"),
+    ("a person throws a punch with their right arm.",                       3.0, 0.4,  "arms"),
+    ("a person does a karate chop with their right hand.",                  3.0, 0.4,  "arms"),
+    ("a person performs a spinning back kick.",                             3.0, 0.45, "all"),
+    ("a person does a boxing combination, throwing jabs and a cross.",      4.0, 0.4,  "arms"),
+    ("a person assumes a fighting stance, fists raised.",                   3.0, 0.5,  "arms"),
+    ("a person performs a roundhouse kick.",                                3.0, 0.45, "all"),
+    ("a person does a judo throw, grabbing and tossing an opponent.",       4.0, 0.35, "upper_body"),
+
+    # ── Sports ───────────────────────────────────────────────────────────────
+    ("a person shoots a basketball with both hands.",                       3.0, 0.4,  "arms"),
+    ("a person swings a tennis racket overhead.",                           3.0, 0.4,  "arms"),
+    ("a person throws a ball overhand.",                                    3.0, 0.35, "arms"),
+    ("a person swings a baseball bat.",                                     3.0, 0.4,  "arms"),
+    ("a person does a volleyball spike, jumping and hitting overhead.",     3.0, 0.4,  "all"),
+    ("a person performs a swimming freestyle stroke.",                      4.0, 0.4,  "arms"),
+    ("a person does a soccer kick.",                                        3.0, 0.45, "all"),
+    ("a person performs a golf swing.",                                     3.0, 0.45, "arms"),
+
+    # ── Dance ────────────────────────────────────────────────────────────────
+    ("a person dances.",                                                    4.0, 0.3,  "upper_body"),
+    ("a person dances jazz, jumping rhythmically.",                         5.0, 0.5,  "upper_body"),
+    ("a person does a hip-hop dance.",                                      4.0, 0.4,  "upper_body"),
+    ("a person does a salsa step.",                                         4.0, 0.5,  "upper_body"),
+    ("a person performs a breakdance toprock.",                             4.0, 0.5,  "arms"),
+    ("a person dances flamenco, stamping their feet.",                      5.0, 0.4,  "upper_body"),
+    ("a person performs a ballet arabesque.",                               3.0, 0.5,  "all"),
+    ("a person does the robot dance.",                                      4.0, 0.4,  "arms"),
+    ("a person waves their arms above their head while dancing.",           4.0, 0.4,  "arms"),
+    ("a person does a contemporary dance, sweeping arms wide.",             5.0, 0.4,  "arms"),
+    ("a person performs a waltz, stepping and turning.",                    5.0, 0.4,  "upper_body"),
+
+    # ── Slow / controlled movements ──────────────────────────────────────────
+    ("a person practices tai chi, performing slow circular movements.",     5.0, 0.3,  "upper_body"),
+    ("a person does a yoga warrior pose, arms extended.",                   4.0, 0.5,  "arms"),
+    ("a person stretches both arms overhead.",                              3.0, 0.5,  "arms"),
+    ("a person does a T-pose, arms held horizontally.",                     3.0, 0.5,  "arms"),
+    ("a person reaches up with one arm to grab something.",                 3.0, 0.5,  "arms"),
+    ("a person does a side stretch, leaning and raising one arm.",          4.0, 0.5,  "arms"),
+    ("a person crosses their arms over their chest.",                       3.0, 0.5,  "arms"),
+
+    # ── Object interaction / expressive ──────────────────────────────────────
+    ("a person lifts a long gun, then walks forward.",                      5.0, 0.3,  "upper_body"),
+    ("a person waves goodbye with their right hand.",                       3.0, 0.5,  "arms"),
+    ("a person claps their hands.",                                         3.0, 0.4,  "arms"),
+    ("a person raises both hands in celebration.",                          3.0, 0.45, "arms"),
+    ("a person shrugs their shoulders.",                                    3.0, 0.5,  "upper_body"),
+    ("a person bows deeply.",                                               3.0, 0.5,  "upper_body"),
+    ("a person points forward with their right arm.",                       3.0, 0.5,  "arms"),
+    ("a person mimics playing a drum kit, striking with both arms.",        4.0, 0.4,  "arms"),
+    ("a person performs a cartwheel.",                                      3.0, 0.45, "all"),
 ]
 
 # ── Default subset for each figure ───────────────────────────────────────────
