@@ -61,23 +61,58 @@ _T_POSE     = (0.50, 0.88)
 _T_FOOT     = (0.72, 1.00)
 
 
-# ── Representative prompts ────────────────────────────────────────────────────
+# ── Full 20-prompt benchmark (mirrors pose_eval_raw.json) ────────────────────
 # (prompt_text, duration_s, t_norm, joint_mask_key)
+_ALL_PROMPTS = [
+    # low-variance
+    ("a person walks forward and stops",                            3.0, 0.5,  "upper_body"),
+    ("a person walks forward.",                                     4.0, 0.5,  "upper_body"),
+    ("a person runs forward.",                                      4.0, 0.4,  "upper_body"),
+    ("a person sprints forward.",                                   4.0, 0.5,  "arms"),
+    ("a person practices tai chi, performing slow circular movements.", 5.0, 0.3, "upper_body"),
+    ("a person walks forward, moving arms and legs while looking left and right.", 6.0, 0.5, "arms"),
+    ("a person marches in place, swinging their arms.",             4.0, 0.4,  "arms"),
+    ("a person lifts a long gun, then walks forward.",              5.0, 0.3,  "upper_body"),
+    ("a person skips forward.",                                     4.0, 0.5,  "all"),
+    # high-variance
+    ("a person dances.",                                            4.0, 0.3,  "upper_body"),
+    ("a person dances jazz, jumping rhythmically.",                 5.0, 0.5,  "upper_body"),
+    ("a person does a hip-hop dance.",                              4.0, 0.4,  "upper_body"),
+    ("a person does a salsa step.",                                 4.0, 0.5,  "upper_body"),
+    ("a person performs a breakdance toprock.",                     4.0, 0.5,  "arms"),
+    ("a person dances flamenco, stamping their feet.",              5.0, 0.4,  "upper_body"),
+    ("a person jumps upward with both legs together.",              3.0, 0.5,  "all"),
+    ("a person jumps up.",                                          3.0, 0.45, "all"),
+    ("a person performs a taekwondo kick, extending their leg.",    3.0, 0.5,  "all"),
+    ("a person performs a side kick.",                              3.0, 0.5,  "all"),
+    ("a person does a front kick followed by a punch.",             4.0, 0.35, "all"),
+]
+
+# ── Default subset for each figure ───────────────────────────────────────────
+# Override with --fig1_prompts / --fig2_prompts on the command line.
 _PROMPTS_MAIN = [
-    ("a person walks forward and stops",                3.0, 0.5,  "upper_body"),
-    ("a person does a hip-hop dance.",                  4.0, 0.4,  "upper_body"),
-    ("a person performs a taekwondo kick, extending their leg.", 3.0, 0.5, "all"),
+    ("a person walks forward and stops",                            3.0, 0.5,  "upper_body"),
+    ("a person does a hip-hop dance.",                              4.0, 0.4,  "upper_body"),
+    ("a person performs a taekwondo kick, extending their leg.",    3.0, 0.5,  "all"),
 ]
 
 _PROMPTS_ABLATION = [
-    ("a person walks forward and stops",    3.0, 0.5, "upper_body"),
-    ("a person dances jazz, jumping rhythmically.", 5.0, 0.5, "upper_body"),
+    ("a person walks forward and stops",                            3.0, 0.5,  "upper_body"),
+    ("a person dances jazz, jumping rhythmically.",                 5.0, 0.5,  "upper_body"),
 ]
 
 _PROMPTS_MC = [
-    ("a person walks forward and stops",    3.0, 0.5, "upper_body"),
-    ("a person marches in place, swinging their arms.", 4.0, 0.4, "arms"),
+    ("a person walks forward and stops",                            3.0, 0.5,  "upper_body"),
+    ("a person marches in place, swinging their arms.",             4.0, 0.4,  "arms"),
 ]
+
+def _prompt_lookup(name: str):
+    """Return (prompt, dur, t_norm, mask) by matching prompt text prefix."""
+    name_l = name.lower()
+    for row in _ALL_PROMPTS:
+        if row[0].lower().startswith(name_l) or name_l in row[0].lower():
+            return row
+    raise ValueError(f"Prompt not found: {name!r}")
 
 _JOINT_MASK_MAP = {
     "all":        None,
@@ -403,6 +438,90 @@ def make_fig3_multiconstraint(
     )
 
 
+# ── Cache-all helper ─────────────────────────────────────────────────────────
+
+def generate_all_cache(
+    pipeline, decoder, cache_dir: str, force: bool = False,
+) -> None:
+    """
+    Pre-generate and cache target + baseline + steered for every prompt in
+    _ALL_PROMPTS.  No figures are produced; use pick_best_cases.py afterwards
+    to rank the prompts, then rerun with --fig1_prompts to make figures.
+    """
+    print(f"\nGenerating cache for all {len(_ALL_PROMPTS)} prompts …")
+    results = []
+    for i, (prompt, dur, t_norm, mask_key) in enumerate(_ALL_PROMPTS):
+        jm   = _JOINT_MASK_MAP[mask_key]
+        pfx  = f"p_{prompt[:30]}"
+        print(f"\n[{i+1}/{len(_ALL_PROMPTS)}] {prompt[:60]}")
+
+        tgt  = _load_or_generate(
+            cache_dir, f"{pfx}_tgt42",
+            lambda p=prompt, d=dur: _generate(pipeline, p, 42, d),
+            force=force,
+        )
+        base = _load_or_generate(
+            cache_dir, f"{pfx}_base43",
+            lambda p=prompt, d=dur: _generate(pipeline, p, 43, d),
+            force=force,
+        )
+
+        T  = tgt.shape[0]
+        kf = int(round(t_norm * (T - 1)))
+
+        def _steer_fn(p=prompt, d=dur, tn=t_norm, jm_=jm, tgt_=tgt):
+            steerer = _build_pose_steerer(
+                pipeline, decoder, p, d, tn, jm_, tgt_,
+                alpha=6.0, apply_latent_mask=True, use_hier=True,
+            )
+            out = steerer.generate(
+                text=p, seed_input=[43],
+                duration_slider=d, cfg_scale=5.0,
+            )
+            return pipeline_output_to_world_joints(out)[0]
+
+        steered = _load_or_generate(
+            cache_dir, f"{pfx}_steer43_full",
+            _steer_fn, force=force,
+        )
+
+        # Quick inline PKE for ranking printout
+        from eval.metrics import canonicalize_frame_np as _canon
+        UPPER = [9, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]
+        Q  = _canon(tgt[kf])
+        eb = float(np.linalg.norm((_canon(base[kf])    - Q)[UPPER], axis=-1).mean())
+        es = float(np.linalg.norm((_canon(steered[kf]) - Q)[UPPER], axis=-1).mean())
+        imp = (eb - es) / (eb + 1e-8) * 100
+        abs_impr = eb - es
+        score = abs_impr * max(imp / 100.0, 0.0)
+        results.append(dict(prompt=prompt, dur=dur, t_norm=t_norm, mask=mask_key,
+                            eb=eb, es=es, imp=imp, abs_impr=abs_impr, score=score))
+        print(f"  PKE  base={eb:.4f}m  steer={es:.4f}m  impr={imp:+.1f}%  score={score:.4f}")
+
+    # Sort and print ranking
+    results.sort(key=lambda r: r["score"], reverse=True)
+    print("\n" + "="*90)
+    print("  RANKING — all prompts by visual score (abs_impr × rel_impr)")
+    print("="*90)
+    print(f"  {'#':<3} {'prompt':<52} {'e_base':>7} {'e_steer':>7} {'abs':>8} {'rel':>8}  score")
+    print(f"  {'-'*3} {'-'*52} {'-'*7} {'-'*7} {'-'*8} {'-'*8}  -----")
+    for i, r in enumerate(results):
+        star = " ★" if i < 3 else ""
+        print(f"  {i+1:<3} {r['prompt'][:52]:<52} {r['eb']:>7.4f} {r['es']:>7.4f} "
+              f"{r['abs_impr']:>+7.4f}m {r['imp']:>+7.1f}%  {r['score']:.4f}{star}")
+    print()
+    print("  Suggested --fig1_prompts value:")
+    top3 = [r["prompt"][:30] for r in results[:3]]
+    print(f"    --fig1_prompts \"{','.join(top3)}\"")
+    print()
+
+    # Save ranking JSON next to cache
+    rank_path = os.path.join(os.path.dirname(cache_dir), "prompt_ranking.json")
+    with open(rank_path, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"  Ranking saved to: {rank_path}")
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
@@ -415,14 +534,14 @@ def main():
     parser.add_argument("--fig1_only",   action="store_true")
     parser.add_argument("--fig2_only",   action="store_true")
     parser.add_argument("--fig3_only",   action="store_true")
+    parser.add_argument("--generate_cache_only", action="store_true",
+                        help="Cache all 20 prompts then print ranking; no figures produced")
+    parser.add_argument("--fig1_prompts", type=str, default="",
+                        help="Comma-separated prompt name prefixes for fig1 (overrides _PROMPTS_MAIN)")
     parser.add_argument("--gpu_id",      type=int, default=0)
     args = parser.parse_args()
 
     dpi = 100 if args.draft else 200
-    any_specific = args.fig1_only or args.fig2_only or args.fig3_only
-    do1 = args.fig1_only or not any_specific
-    do2 = args.fig2_only or not any_specific
-    do3 = args.fig3_only or not any_specific
 
     os.makedirs(args.output_dir, exist_ok=True)
     os.makedirs(args.cache_dir, exist_ok=True)
@@ -436,6 +555,26 @@ def main():
     )
 
     t0 = time.time()
+
+    # ── Cache-only mode ────────────────────────────────────────────────────────
+    if args.generate_cache_only:
+        generate_all_cache(pipeline, decoder, args.cache_dir, force=args.force)
+        print(f"\nDone.  Total: {(time.time()-t0)/60:.1f} min")
+        return
+
+    # ── Override fig1 prompts if requested ────────────────────────────────────
+    global _PROMPTS_MAIN
+    if args.fig1_prompts:
+        names = [n.strip() for n in args.fig1_prompts.split(",") if n.strip()]
+        _PROMPTS_MAIN = [_prompt_lookup(n) for n in names]
+        print(f"fig1 prompts overridden ({len(_PROMPTS_MAIN)} prompts):")
+        for row in _PROMPTS_MAIN:
+            print(f"  • {row[0]}")
+
+    any_specific = args.fig1_only or args.fig2_only or args.fig3_only
+    do1 = args.fig1_only or not any_specific
+    do2 = args.fig2_only or not any_specific
+    do3 = args.fig3_only or not any_specific
 
     if do1:
         print("\n── Figure 1: Pose comparison ────────────────────────────────")
