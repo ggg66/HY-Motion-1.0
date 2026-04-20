@@ -189,12 +189,57 @@ for r43, r44 in zip(d5['6.0'], d5_s44):
           f'{r43["jerk_ratio"]:6.3f}  {r44["jerk_ratio"]:6.3f}  '
           f'{r43["kinvar_ratio"]:6.3f}  {r44["kinvar_ratio"]:6.3f}{flag}')
 
-# ── Section I ────────────────────────────────────────────────────────────────
+# ── Section I: temporal_mask ablation (loaded when P1 results exist) ─────────
 print()
-print('  SECTION I: Pending experiments')
+print('  SECTION I: P1 -- temporal_mask ablation at alpha=6 (n=40 each)')
+print('  Compare: full combo WITH temporal_mask vs WITHOUT temporal_mask')
+print('  (FootContactConstraint now has late-phase ramp; TerminalConstraint has tail Gaussian)')
+print(H)
+print(SEP)
+
+_p1_with_path = f'{BASE}/ablation_pose_P1_with_tmask/results.json'
+_p1_no_path   = f'{BASE}/ablation_pose_P1_no_tmask/results.json'
+_p1_loaded = True
+
+try:
+    p1_with = load(_p1_with_path)
+    p1_no   = load(_p1_no_path)
+except FileNotFoundError as e:
+    print(f'  [NOT YET RUN]  {e}')
+    print(f'  Run: bash eval/run_ablation_D.sh  (P1_with + P1_no groups)')
+    _p1_loaded = False
+
+if _p1_loaded:
+    pr('P1  WITH temporal_mask  alpha=6', p1_with, 'tgt=42 s=43+44')
+    pr('P1  NO  temporal_mask  alpha=6', p1_no,   'tgt=42 s=43+44')
+    pi_w, _, _ = stats(p1_with, 'pose_hit_improvement_pct')
+    pi_n, _, _ = stats(p1_no,   'pose_hit_improvement_pct')
+    jr_w, _, _ = stats(p1_with, 'jerk_ratio')
+    jr_n, _, _ = stats(p1_no,   'jerk_ratio')
+    kv_w, _, _ = stats(p1_with, 'kinvar_ratio')
+    kv_n, _, _ = stats(p1_no,   'kinvar_ratio')
+    print(f'  pose_imp  WITH: {pi_w:+.1f}%  NO: {pi_n:+.1f}%  '
+          f'  Δpose_imp = {pi_w - pi_n:+.1f}pp')
+    print(f'  jerk      WITH: x{jr_w:.3f}  NO: x{jr_n:.3f}  '
+          f'  Δjerk = {(jr_w - jr_n) * 100:+.1f}pp')
+    print(f'  kv        WITH: x{kv_w:.3f}  NO: x{kv_n:.3f}  '
+          f'  Δkv   = {(kv_w - kv_n) * 100:+.1f}pp')
+    print()
+    # Low/high split
+    p1w_low  = [r for r in p1_with if r.get('variance') == 'low']
+    p1w_high = [r for r in p1_with if r.get('variance') == 'high']
+    p1n_low  = [r for r in p1_no   if r.get('variance') == 'low']
+    p1n_high = [r for r in p1_no   if r.get('variance') == 'high']
+    pr('  P1 WITH  low-variance',  p1w_low,  f'n={len(p1w_low)}')
+    pr('  P1 NO    low-variance',  p1n_low,  f'n={len(p1n_low)}')
+    pr('  P1 WITH  high-variance', p1w_high, f'n={len(p1w_high)}')
+    pr('  P1 NO    high-variance', p1n_high, f'n={len(p1n_high)}')
+
+# ── Section J: Pending ────────────────────────────────────────────────────────
+print()
+print('  SECTION J: Pending experiments')
 print(SEP)
 for exp in [
-    'P1  no_temporal_mask ablation       alpha=6  seeds=43+44  (--no_temporal_mask)',
     'P4  no_hierarchical ablation        alpha=6  seeds=43+44  (drop --use_hierarchical)',
     'P2a pose + foot_contact combo       alpha=6  seeds=43+44',
     'P2b pose + waypoint combo           alpha=6  seeds=43+44',

@@ -27,9 +27,18 @@ set -e
 
 # ============================================================
 # Priority 1: temporal_mask ablation at alpha=6
+# Two conditions for clean ablation comparison:
+#   P1_with  = full combo WITH temporal_mask (default ON)
+#   P1_no    = full combo WITHOUT temporal_mask (--no_temporal_mask)
+# Compare these two to isolate the contribution of temporal masking.
 # ============================================================
 echo "============================================================"
-echo " P1a  no_temporal_mask  α=6  full combo  seeds=43,44"
+echo " P1_with  WITH temporal_mask  α=6  full combo  seeds=43,44"
+echo "============================================================"
+python eval/run_pose_sc.py --model_path "$MODEL" --prompt_file "$PROMPTS" --target_seed $TARGET_SEED --seeds 43,44 --alpha_pose 6.0 --soft_norm_tau $TAU --use_hierarchical --apply_latent_mask --output_dir output/ablation_pose_P1_with_tmask
+
+echo "============================================================"
+echo " P1_no   no_temporal_mask  α=6  full combo  seeds=43,44"
 echo "============================================================"
 python eval/run_pose_sc.py --model_path "$MODEL" --prompt_file "$PROMPTS" --target_seed $TARGET_SEED --seeds 43,44 --alpha_pose 6.0 --soft_norm_tau $TAU --use_hierarchical --apply_latent_mask --no_temporal_mask --output_dir output/ablation_pose_P1_no_tmask
 
@@ -63,8 +72,12 @@ python eval/run_multiconstraint_sc.py --model_path "$MODEL" --prompt_file "$PROM
 echo ""
 echo "All experiments complete."
 echo "Results:"
-echo "  P1 no_tmask : output/ablation_pose_P1_no_tmask/results.json"
-echo "  P4 no_hier  : output/ablation_pose_P4_no_hier/results.json"
-echo "  P2a pose+ft : output/ablation_mc_pose_foot/results.json"
-echo "  P2b pose+wp : output/ablation_mc_pose_waypoint/results.json"
-echo "  P2c all     : output/ablation_mc_all/results.json"
+echo "  P1 with_tmask : output/ablation_pose_P1_with_tmask/results.json"
+echo "  P1 no_tmask   : output/ablation_pose_P1_no_tmask/results.json"
+echo "  P4 no_hier    : output/ablation_pose_P4_no_hier/results.json"
+echo "  P2a pose+ft   : output/ablation_mc_pose_foot/results.json"
+echo "  P2b pose+wp   : output/ablation_mc_pose_waypoint/results.json"
+echo "  P2c all       : output/ablation_mc_all/results.json"
+echo ""
+echo "Temporal mask ablation comparison:"
+echo "  python eval/print_results.py output/ablation_pose_P1_with_tmask/results.json output/ablation_pose_P1_no_tmask/results.json"

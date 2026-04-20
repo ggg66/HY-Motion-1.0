@@ -159,6 +159,21 @@ class TerminalConstraint(BaseConstraint):
 
         return F.mse_loss(tail_k, target_exp.expand_as(tail_k))
 
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        """
+        Narrow Gaussian centred on the tail region.
+
+        Terminal position is only meaningful at the end of the sequence.
+        Focusing the gradient on tail frames prevents spurious steering at
+        early frames where no terminal constraint is implied.
+        σ is set to tail_frames so the window spans roughly ±1 tail-window.
+        """
+        t_idx  = torch.arange(T, device=device, dtype=torch.float32)
+        center = float(T - 1) - self.tail_frames / 2.0
+        sigma  = max(1.0, float(self.tail_frames))
+        w = torch.exp(-0.5 * ((t_idx - center) / sigma) ** 2)
+        return w / w.max().clamp(min=1e-8)
+
 
 # ---------------------------------------------------------------------------
 # TrajectoryConstraint  (L_traj)
@@ -247,6 +262,23 @@ class FootContactConstraint(BaseConstraint):
         self.sharpness = sigmoid_sharpness
         self.weight = weight
         self.detach_mask = detach_mask
+
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        """
+        Sigmoid ramp: low weight in early frames, rising through mid-sequence.
+
+        Foot-contact constraints (sliding velocity, floor height) are most
+        meaningful once the character has established its trajectory.
+        Applying full contact steering in the early ODE phase disrupts path
+        planning and introduces jerk.
+
+        Shape: ≈ 0.12 at t=0  →  0.50 at t=0.50  →  ≈ 0.98 at t=1.0.
+        The ramp centre is at t=0.50; sharpness=8 gives a smooth transition
+        without hard-clamping the early frames entirely.
+        """
+        t_norm = torch.arange(T, device=device, dtype=torch.float32) / max(T - 1, 1)
+        w = torch.sigmoid((t_norm - 0.50) * 8.0)
+        return w / w.max().clamp(min=1e-8)
 
     def loss(self, joints: Tensor) -> Tensor:
         """
