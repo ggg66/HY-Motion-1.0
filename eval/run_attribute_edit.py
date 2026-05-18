@@ -60,6 +60,20 @@ def _parse_ints(raw: str) -> List[int]:
     return [int(x.strip()) for x in raw.split(",") if x.strip()]
 
 
+def _load_prompt_cases(args) -> List[Dict]:
+    if args.prompts_file is None:
+        return [{"prompt": args.prompt}]
+    with open(args.prompts_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if isinstance(data, list):
+        cases = [item if isinstance(item, dict) else {"prompt": str(item)} for item in data]
+    elif isinstance(data, dict) and "prompts" in data:
+        cases = [item if isinstance(item, dict) else {"prompt": str(item)} for item in data["prompts"]]
+    else:
+        raise ValueError(f"Unsupported prompts file format: {args.prompts_file}")
+    return [case for case in cases if str(case.get("prompt", "")).strip()]
+
+
 def _window_indices(T: int, t_start: float, t_end: float) -> np.ndarray:
     lo = int(round(t_start * (T - 1)))
     hi = int(round(t_end * (T - 1))) + 1
@@ -287,6 +301,7 @@ def main():
     parser = argparse.ArgumentParser(description="Temporal attribute edit evaluation")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--prompt", default="a person walks forward.")
+    parser.add_argument("--prompts_file", default=None)
     parser.add_argument("--duration", type=float, default=4.0)
     parser.add_argument("--seeds", default="43")
     parser.add_argument("--output_dir", default="output/attribute_sweep")
@@ -328,7 +343,14 @@ def main():
 
     os.makedirs(args.output_dir, exist_ok=True)
     seeds = [int(x) for x in args.seeds.split(",")]
-    delta_y_values = _parse_floats(args.delta_y_values)
+    prompt_cases = _load_prompt_cases(args)
+    default_edit_joint = args.edit_joint
+    default_delta_x = args.delta_x
+    default_delta_y_values = args.delta_y_values
+    default_delta_z = args.delta_z
+    default_t_start = args.t_start
+    default_t_end = args.t_end
+    default_edge_frac = args.edge_frac
     alpha_values = _parse_floats(args.alpha_values)
     max_steer_ratios = _parse_floats(args.max_steer_ratios)
     refine_steps_values = _parse_ints(args.refine_steps_values)
@@ -350,100 +372,122 @@ def main():
     run_refine = args.method in ("refine", "both")
     rows = []
 
-    for seed in seeds:
-        print(f"\nBaseline seed={seed}")
-        with torch.no_grad():
-            baseline_out = pipeline.generate(
-                text=args.prompt,
-                seed_input=[seed],
-                duration_slider=args.duration,
-                cfg_scale=args.cfg_scale,
-            )
-        baseline = pipeline_output_to_world_joints(baseline_out)[0]
-        np.save(os.path.join(args.output_dir, f"baseline_seed{seed}.npy"), baseline)
+    for prompt_idx, case in enumerate(prompt_cases):
+        args.prompt = str(case["prompt"])
+        args.edit_joint = str(case.get("edit_joint", default_edit_joint))
+        if args.edit_joint not in _EDIT_JOINTS:
+            raise ValueError(f"Unknown edit_joint in case {prompt_idx}: {args.edit_joint}")
+        args.delta_x = float(case.get("delta_x", default_delta_x))
+        args.delta_z = float(case.get("delta_z", default_delta_z))
+        args.t_start = float(case.get("t_start", default_t_start))
+        args.t_end = float(case.get("t_end", default_t_end))
+        args.edge_frac = float(case.get("edge_frac", default_edge_frac))
+        delta_y_values = _parse_floats(str(case.get("delta_y_values", default_delta_y_values)))
 
-        for delta_y in delta_y_values:
-            if run_steer:
-                for alpha in alpha_values:
-                    for ratio in max_steer_ratios:
-                        t0 = time.time()
-                        edited = _run_steer_one(
-                            pipeline, decoder, baseline, seed, args, delta_y, alpha, ratio
-                        )
-                        row = _metrics_row(
-                            args,
-                            baseline,
-                            edited,
-                            seed,
-                            delta_y,
-                            "steer",
-                            {
-                                "alpha": alpha,
-                                "max_steer_ratio": ratio,
-                                "refine_steps": 0,
-                                "refine_lr": 0.0,
-                                            "refine_constraint_weight": 0.0,
-                                            "refine_delta_smoothness": 0.0,
-                                            "refine_joint_proximity": 0.0,
-                                "refine_smoothness": 0.0,
-                            },
-                            time.time() - t0,
-                        )
-                        rows.append(row)
-                        print(
-                            f"  steer  dy={delta_y:.2f} alpha={alpha:.1f} ratio={ratio:.2f} | "
-                            f"achieved={row['achieved_delta_m']:.3f}m "
-                            f"({row['achievement_pct']:.1f}%) | jerk={row['jerk_ratio']:.3f}"
-                        )
+        case_id = str(case.get("id", f"case_{prompt_idx:02d}"))
+        print(f"\nPrompt {prompt_idx} [{case_id}]: {args.prompt}")
+        print(
+            f"  edit_joint={args.edit_joint}, dy={delta_y_values}, "
+            f"window=({args.t_start:.2f}, {args.t_end:.2f})"
+        )
+        for seed in seeds:
+            print(f"\nBaseline seed={seed}")
+            with torch.no_grad():
+                baseline_out = pipeline.generate(
+                    text=args.prompt,
+                    seed_input=[seed],
+                    duration_slider=args.duration,
+                    cfg_scale=args.cfg_scale,
+                )
+            baseline = pipeline_output_to_world_joints(baseline_out)[0]
+            np.save(os.path.join(args.output_dir, f"baseline_p{prompt_idx:02d}_seed{seed}.npy"), baseline)
 
-            if run_refine:
-                for r_steps in refine_steps_values:
-                    for lr in refine_lr_values:
-                        for c_weight in refine_constraint_weights:
-                            for d_smooth in refine_delta_smoothness_values:
-                                for j_prox in refine_joint_proximity_values:
-                                    for smooth in refine_smoothness_values:
-                                        t0 = time.time()
-                                        edited = _run_refine_one(
-                                            pipeline,
-                                            decoder,
-                                            baseline_out,
-                                            baseline,
-                                            args,
-                                            delta_y,
-                                            r_steps,
-                                            lr,
-                                            c_weight,
-                                            j_prox,
-                                            smooth,
-                                            d_smooth,
-                                        )
-                                        row = _metrics_row(
-                                            args,
-                                            baseline,
-                                            edited,
-                                            seed,
-                                            delta_y,
-                                            "refine",
-                                            {
-                                                "alpha": 0.0,
-                                                "max_steer_ratio": 0.0,
-                                                "refine_steps": r_steps,
-                                                "refine_lr": lr,
-                                                "refine_constraint_weight": c_weight,
-                                                "refine_delta_smoothness": d_smooth,
-                                                "refine_joint_proximity": j_prox,
-                                                "refine_smoothness": smooth,
-                                            },
-                                            time.time() - t0,
-                                        )
-                                        rows.append(row)
-                                        print(
-                                            f"  refine dy={delta_y:.2f} steps={r_steps} cw={c_weight:.1f} "
-                                            f"ds={d_smooth:g} jp={j_prox:g} sm={smooth:g} | "
-                                            f"achieved={row['achieved_delta_m']:.3f}m "
-                                            f"({row['achievement_pct']:.1f}%) | jerk={row['jerk_ratio']:.3f}"
-                                        )
+            for delta_y in delta_y_values:
+                if run_steer:
+                    for alpha in alpha_values:
+                        for ratio in max_steer_ratios:
+                            t0 = time.time()
+                            edited = _run_steer_one(
+                                pipeline, decoder, baseline, seed, args, delta_y, alpha, ratio
+                            )
+                            row = _metrics_row(
+                                args,
+                                baseline,
+                                edited,
+                                seed,
+                                delta_y,
+                                "steer",
+                                {
+                                    "prompt_idx": prompt_idx,
+                                    "case_id": case_id,
+                                    "alpha": alpha,
+                                    "max_steer_ratio": ratio,
+                                    "refine_steps": 0,
+                                    "refine_lr": 0.0,
+                                    "refine_constraint_weight": 0.0,
+                                    "refine_delta_smoothness": 0.0,
+                                    "refine_joint_proximity": 0.0,
+                                    "refine_smoothness": 0.0,
+                                },
+                                time.time() - t0,
+                            )
+                            rows.append(row)
+                            print(
+                                f"  steer  dy={delta_y:.2f} alpha={alpha:.1f} ratio={ratio:.2f} | "
+                                f"achieved={row['achieved_delta_m']:.3f}m "
+                                f"({row['achievement_pct']:.1f}%) | jerk={row['jerk_ratio']:.3f}"
+                            )
+
+                if run_refine:
+                    for r_steps in refine_steps_values:
+                        for lr in refine_lr_values:
+                            for c_weight in refine_constraint_weights:
+                                for d_smooth in refine_delta_smoothness_values:
+                                    for j_prox in refine_joint_proximity_values:
+                                        for smooth in refine_smoothness_values:
+                                            t0 = time.time()
+                                            edited = _run_refine_one(
+                                                pipeline,
+                                                decoder,
+                                                baseline_out,
+                                                baseline,
+                                                args,
+                                                delta_y,
+                                                r_steps,
+                                                lr,
+                                                c_weight,
+                                                j_prox,
+                                                smooth,
+                                                d_smooth,
+                                            )
+                                            row = _metrics_row(
+                                                args,
+                                                baseline,
+                                                edited,
+                                                seed,
+                                                delta_y,
+                                                "refine",
+                                                {
+                                                    "prompt_idx": prompt_idx,
+                                                    "case_id": case_id,
+                                                    "alpha": 0.0,
+                                                    "max_steer_ratio": 0.0,
+                                                    "refine_steps": r_steps,
+                                                    "refine_lr": lr,
+                                                    "refine_constraint_weight": c_weight,
+                                                    "refine_delta_smoothness": d_smooth,
+                                                    "refine_joint_proximity": j_prox,
+                                                    "refine_smoothness": smooth,
+                                                },
+                                                time.time() - t0,
+                                            )
+                                            rows.append(row)
+                                            print(
+                                                f"  refine dy={delta_y:.2f} steps={r_steps} cw={c_weight:.1f} "
+                                                f"ds={d_smooth:g} jp={j_prox:g} sm={smooth:g} | "
+                                                f"achieved={row['achieved_delta_m']:.3f}m "
+                                                f"({row['achievement_pct']:.1f}%) | jerk={row['jerk_ratio']:.3f}"
+                                            )
 
     selected = _select_budget_rows(rows, args)
     if args.save_best_npy:

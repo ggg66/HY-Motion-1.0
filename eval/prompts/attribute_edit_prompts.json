@@ -1,0 +1,42 @@
+[
+  {
+    "id": "walk",
+    "prompt": "a person walks forward naturally.",
+    "edit_joint": "right_arm",
+    "delta_y_values": "0.20,0.35",
+    "t_start": 0.30,
+    "t_end": 0.70
+  },
+  {
+    "id": "march",
+    "prompt": "a person marches in place with rhythmic arm swings.",
+    "edit_joint": "both_arms",
+    "delta_y_values": "0.15,0.25",
+    "t_start": 0.25,
+    "t_end": 0.65
+  },
+  {
+    "id": "dance",
+    "prompt": "a person performs a simple dance with upper body movement.",
+    "edit_joint": "right_arm",
+    "delta_y_values": "0.15,0.25",
+    "t_start": 0.30,
+    "t_end": 0.70
+  },
+  {
+    "id": "kick",
+    "prompt": "a person performs a side kick and returns to standing.",
+    "edit_joint": "right_foot",
+    "delta_y_values": "0.15,0.25",
+    "t_start": 0.35,
+    "t_end": 0.70
+  },
+  {
+    "id": "exercise",
+    "prompt": "a person does a light aerobic exercise routine.",
+    "edit_joint": "both_arms",
+    "delta_y_values": "0.15,0.25",
+    "t_start": 0.25,
+    "t_end": 0.70
+  }
+]
