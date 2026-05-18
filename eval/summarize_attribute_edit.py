@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import os
 from collections import defaultdict
 from statistics import mean, pstdev
 from typing import Dict, Iterable, List
@@ -27,37 +28,47 @@ def _fmt_mean_std(values: Iterable[float], digits: int = 2) -> str:
     return f"{mean(vals):.{digits}f} +/- {pstdev(vals):.{digits}f}"
 
 
-def _group_rows(rows: List[Dict[str, str]]) -> Dict[str, List[Dict[str, str]]]:
+def _group_rows(rows: List[Dict[str, str]], group_fields: List[str]) -> Dict[str, List[Dict[str, str]]]:
     groups: Dict[str, List[Dict[str, str]]] = defaultdict(list)
     for row in rows:
-        case_id = row.get("case_id") or row.get("prompt") or "case"
-        method = row.get("method", "")
-        groups[f"{case_id}:{method}"].append(row)
+        parts = []
+        for field in group_fields:
+            if field == "case_id":
+                value = row.get("case_id") or row.get("prompt") or row.get("source") or "case"
+            else:
+                value = row.get(field, "")
+            parts.append(str(value))
+        groups[":".join(parts)].append(row)
     return dict(groups)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize attribute-edit results.csv")
-    parser.add_argument("csv_path")
+    parser.add_argument("csv_path", nargs="+")
+    parser.add_argument("--group_by", default="case_id,method")
     parser.add_argument("--markdown", action="store_true", help="Print a Markdown table")
     args = parser.parse_args()
 
-    with open(args.csv_path, newline="", encoding="utf-8") as f:
-        rows = list(csv.DictReader(f))
-    groups = _group_rows(rows)
+    rows = []
+    for csv_path in args.csv_path:
+        source = os.path.basename(os.path.dirname(os.path.abspath(csv_path)))
+        with open(csv_path, newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                row.setdefault("source", source)
+                rows.append(row)
+    group_fields = [field.strip() for field in args.group_by.split(",") if field.strip()]
+    groups = _group_rows(rows, group_fields)
 
     table = []
     for key, group in sorted(groups.items()):
-        case_id, method = key.rsplit(":", 1)
         achieved = [_as_float(r, "achieved_delta_m") for r in group]
         achievement = [_as_float(r, "achievement_pct") for r in group]
         jerk = [_as_float(r, "jerk_ratio") for r in group]
         foot = [_as_float(r, "foot_sliding_ratio") for r in group]
         pass_rate = 100.0 * sum(_as_bool(r, "meets_budget") for r in group) / max(len(group), 1)
-        table.append(
+        row = {field: value for field, value in zip(group_fields, key.split(":"))}
+        row.update(
             {
-                "case_id": case_id,
-                "method": method,
                 "n": str(len(group)),
                 "achieved_delta_m": _fmt_mean_std(achieved, 3),
                 "achievement_pct": _fmt_mean_std(achievement, 1),
@@ -66,10 +77,9 @@ def main() -> None:
                 "budget_pass_pct": f"{pass_rate:.1f}",
             }
         )
+        table.append(row)
 
-    headers = [
-        "case_id",
-        "method",
+    headers = group_fields + [
         "n",
         "achieved_delta_m",
         "achievement_pct",

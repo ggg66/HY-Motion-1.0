@@ -360,7 +360,24 @@ Larger walk/kick offsets (15--20 cm) remain target-seeking but exceed the jerk b
 We use those settings for the edit-strength/quality tradeoff curve rather than for the
 main qualitative figure.
 
-**Table 5. Sampling-time steering vs. latent refinement.**
+**Table 5. Edit-strength/quality tradeoff on locomotion-heavy cases.**
+
+| Case | Target (m) | Achieved (m) | Achievement | Jerk Ratio | Foot Sliding Ratio | Budget Pass |
+|---|---:|---:|---:|---:|---:|---:|
+| walk arm | 0.10 | 0.094 | 93.6 | 1.436 | 0.974 | 100% |
+| walk arm | 0.15 | 0.145 | 96.7 | 2.235 | 0.931 | 0% |
+| walk arm | 0.20 | 0.196 | 97.8 | 3.501 | 0.905 | 0% |
+| kick foot | 0.10 | 0.083 | 83.4 | 1.930 | 1.061 | 100% |
+| kick foot | 0.15 | 0.132 | 88.1 | 2.044 | 1.085 | 0% |
+| kick foot | 0.20 | 0.181 | 90.4 | 2.687 | 1.135 | 0% |
+
+This curve separates two phenomena that are visually easy to conflate: target seeking and
+motion-quality preservation.  The editor continues to move toward the requested target at
+larger offsets, but locomotion-heavy motions pay a rapidly increasing jerk cost.  We
+therefore use 10 cm as the main quality-preserving setting for walk/kick and reserve
+larger offsets for tradeoff analysis.
+
+**Table 6. Sampling-time steering vs. latent refinement.**
 For each method, we select the best budget-aware configuration per seed from the same
 candidate set.
 
