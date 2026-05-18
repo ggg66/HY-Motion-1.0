@@ -388,6 +388,7 @@ def refine_baseline(args, pipeline, baseline_out, constraints, device):
         lr=args.refine_lr,
         constraint_weight=args.refine_constraint_weight,
         latent_proximity_weight=args.refine_latent_proximity,
+        delta_smoothness_weight=args.refine_delta_smoothness,
         joint_proximity_weight=args.refine_joint_proximity,
         smoothness_weight=args.refine_smoothness,
         max_delta=args.refine_max_delta,
@@ -449,6 +450,7 @@ def main():
     parser.add_argument("--refine_lr", type=float, default=0.05)
     parser.add_argument("--refine_constraint_weight", type=float, default=10.0)
     parser.add_argument("--refine_latent_proximity", type=float, default=1e-3)
+    parser.add_argument("--refine_delta_smoothness", type=float, default=0.01)
     parser.add_argument("--refine_joint_proximity", type=float, default=0.02)
     parser.add_argument("--refine_smoothness", type=float, default=0.01)
     parser.add_argument("--refine_max_delta", type=float, default=3.0)

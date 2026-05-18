@@ -38,6 +38,7 @@ class LatentRefiner:
         lr: float = 0.05,
         constraint_weight: float = 10.0,
         latent_proximity_weight: float = 1e-3,
+        delta_smoothness_weight: float = 0.0,
         joint_proximity_weight: float = 0.02,
         smoothness_weight: float = 0.01,
         max_delta: float = 3.0,
@@ -54,6 +55,7 @@ class LatentRefiner:
         self.lr = lr
         self.constraint_weight = constraint_weight
         self.latent_proximity_weight = latent_proximity_weight
+        self.delta_smoothness_weight = delta_smoothness_weight
         self.joint_proximity_weight = joint_proximity_weight
         self.smoothness_weight = smoothness_weight
         self.max_delta = max_delta
@@ -86,6 +88,12 @@ class LatentRefiner:
         jerk = joints[:, 3:] - 3 * joints[:, 2:-1] + 3 * joints[:, 1:-2] - joints[:, :-3]
         return (jerk ** 2).mean()
 
+    @staticmethod
+    def _delta_smoothness_loss(delta: Tensor) -> Tensor:
+        if delta.shape[1] < 2:
+            return delta.new_zeros(())
+        return ((delta[:, 1:] - delta[:, :-1]) ** 2).mean()
+
     def refine(self, initial_latent: Tensor) -> RefinementResult:
         """Refine normalized latent of shape (B, T, 201)."""
         device = initial_latent.device
@@ -116,12 +124,14 @@ class LatentRefiner:
 
             constraint_loss = self.constraints(joints)
             latent_prox = (delta ** 2).mean()
+            delta_smooth = self._delta_smoothness_loss(delta)
             joint_prox = F.mse_loss(joints, baseline_joints)
             smooth_loss = self._jerk_loss(joints)
 
             loss = (
                 self.constraint_weight * constraint_loss
                 + self.latent_proximity_weight * latent_prox
+                + self.delta_smoothness_weight * delta_smooth
                 + self.joint_proximity_weight * joint_prox
                 + self.smoothness_weight * smooth_loss
             )
@@ -140,6 +150,7 @@ class LatentRefiner:
                     "loss": loss_value,
                     "constraint_loss": float(constraint_loss.detach().cpu()),
                     "latent_proximity": float(latent_prox.detach().cpu()),
+                    "delta_smoothness": float(delta_smooth.detach().cpu()),
                     "joint_proximity": float(joint_prox.detach().cpu()),
                     "smoothness_loss": float(smooth_loss.detach().cpu()),
                     "delta_rms": float(delta.detach().pow(2).mean().sqrt().cpu()),

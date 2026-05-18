@@ -1,26 +1,13 @@
-"""
-Attribute-edit sweep for FlowSteer-Motion.
+"""Attribute-edit evaluation for FlowSteer-Motion.
 
-This script tests whether user-level temporal edits are controllable.  It runs
-one baseline motion per seed, then applies a TemporalJointOffsetConstraint under
-multiple steering settings and reports:
+This script evaluates segment-level user edits such as "raise the right arm by
+0.35 m from 30%-70% of the motion".  It supports both:
 
-  - achieved_delta_m: mean displacement along the requested edit direction
-  - achievement_pct: achieved_delta_m / requested_delta_m
-  - jerk_ratio: motion smoothness cost relative to baseline
-  - foot_sliding_ratio: contact-foot velocity cost relative to baseline
+  - steer: sampling-time FlowSteer updates during Euler integration
+  - refine: post-sampling latent optimization on the generated baseline
 
-Example:
-    python eval/run_attribute_edit.py \
-        --model_path ckpts/tencent/HY-Motion-1.0 \
-        --prompt "a person walks forward." \
-        --duration 4.0 \
-        --seeds 43 \
-        --edit_joint right_arm \
-        --delta_y_values 0.20,0.35 \
-        --alpha_values 20,40,80 \
-        --max_steer_ratios 0.3,0.6,1.0 \
-        --output_dir output/attribute_sweep_raise_hand
+The key metrics are edit achievement and quality cost, so results can be used
+to build controllability curves and choose budget-feasible settings.
 """
 
 from __future__ import annotations
@@ -31,7 +18,7 @@ import json
 import os
 import sys
 import time
-from typing import Dict, List
+from typing import Dict, Iterable, List
 
 import numpy as np
 import torch
@@ -42,7 +29,14 @@ if _repo_root not in sys.path:
 
 from demo_steer import load_pipeline, pipeline_output_to_world_joints
 from eval.metrics import compute_quality_metrics
-from steering import CompositeConstraint, FlowSteerer, MotionDecoder, TemporalJointOffsetConstraint
+from steering import (
+    CompositeConstraint,
+    FlowSteerer,
+    LatentRefiner,
+    MotionDecoder,
+    StagedScheduler,
+    TemporalJointOffsetConstraint,
+)
 
 
 _EDIT_JOINTS: Dict[str, List[int]] = {
@@ -62,6 +56,10 @@ def _parse_floats(raw: str) -> List[float]:
     return [float(x.strip()) for x in raw.split(",") if x.strip()]
 
 
+def _parse_ints(raw: str) -> List[int]:
+    return [int(x.strip()) for x in raw.split(",") if x.strip()]
+
+
 def _window_indices(T: int, t_start: float, t_end: float) -> np.ndarray:
     lo = int(round(t_start * (T - 1)))
     hi = int(round(t_end * (T - 1))) + 1
@@ -72,7 +70,7 @@ def _window_indices(T: int, t_start: float, t_end: float) -> np.ndarray:
 
 def _mean_delta_along(
     baseline: np.ndarray,
-    steered: np.ndarray,
+    edited: np.ndarray,
     joint_indices: List[int],
     direction: np.ndarray,
     t_start: float,
@@ -80,7 +78,7 @@ def _mean_delta_along(
 ) -> float:
     idx = _window_indices(baseline.shape[0], t_start, t_end)
     direction = direction / (np.linalg.norm(direction) + 1e-8)
-    delta = steered[idx][:, joint_indices, :] - baseline[idx][:, joint_indices, :]
+    delta = edited[idx][:, joint_indices, :] - baseline[idx][:, joint_indices, :]
     return float(np.tensordot(delta, direction, axes=([-1], [0])).mean())
 
 
@@ -94,21 +92,18 @@ def _foot_sliding_proxy(joints_np: np.ndarray) -> float:
     return float((contact * foot_vel).sum() / (contact.sum() + 1e-8))
 
 
-def run_one(
-    pipeline,
-    decoder,
-    baseline_joints: np.ndarray,
-    prompt: str,
-    duration: float,
-    seed: int,
-    args,
-    delta_y: float,
-    alpha: float,
-    max_steer_ratio: float,
-) -> Dict:
+def _denorm_latent_to_norm(pipeline, latent_denorm: torch.Tensor, device: torch.device) -> torch.Tensor:
+    mean = pipeline.mean.to(device).view(1, 1, -1)
+    std = pipeline.std.to(device).view(1, 1, -1)
+    std_safe = std.clone()
+    std_safe[std_safe < 1e-3] = 1.0
+    return (latent_denorm.to(device) - mean) / std_safe
+
+
+def _build_constraint(args, baseline_joints: np.ndarray, delta_y: float) -> CompositeConstraint:
     joint_indices = _EDIT_JOINTS[args.edit_joint]
     offset = torch.tensor([args.delta_x, delta_y, args.delta_z], dtype=torch.float32)
-    constraint = CompositeConstraint([
+    return CompositeConstraint([
         (
             TemporalJointOffsetConstraint(
                 reference_joints=torch.from_numpy(baseline_joints).float(),
@@ -122,11 +117,74 @@ def run_one(
         )
     ])
 
+
+def _metrics_row(
+    args,
+    baseline_joints: np.ndarray,
+    edited_joints: np.ndarray,
+    seed: int,
+    delta_y: float,
+    method: str,
+    params: Dict[str, float],
+    elapsed_sec: float,
+) -> Dict:
+    joint_indices = _EDIT_JOINTS[args.edit_joint]
+    requested = float(np.linalg.norm([args.delta_x, delta_y, args.delta_z]))
+    achieved = _mean_delta_along(
+        baseline_joints,
+        edited_joints,
+        joint_indices,
+        np.array([args.delta_x, delta_y, args.delta_z], dtype=np.float32),
+        args.t_start,
+        args.t_end,
+    )
+    achievement_pct = achieved / (requested + 1e-8) * 100.0
+
+    q_base = compute_quality_metrics(baseline_joints[None])
+    q_edit = compute_quality_metrics(edited_joints[None])
+    foot_base = _foot_sliding_proxy(baseline_joints)
+    foot_edit = _foot_sliding_proxy(edited_joints)
+    jerk_ratio = q_edit.mean_jerk / (q_base.mean_jerk + 1e-9)
+    foot_ratio = foot_edit / (foot_base + 1e-9)
+
+    row = {
+        "prompt": args.prompt,
+        "seed": seed,
+        "method": method,
+        "edit_joint": args.edit_joint,
+        "delta_y": delta_y,
+        "requested_delta_m": requested,
+        "achieved_delta_m": achieved,
+        "achievement_pct": achievement_pct,
+        "jerk_ratio": jerk_ratio,
+        "foot_sliding_base": foot_base,
+        "foot_sliding_edited": foot_edit,
+        "foot_sliding_ratio": foot_ratio,
+        "meets_target": achievement_pct >= args.target_achievement_pct,
+        "meets_jerk_budget": jerk_ratio <= args.jerk_budget,
+        "meets_budget": achievement_pct >= args.target_achievement_pct and jerk_ratio <= args.jerk_budget,
+        "elapsed_sec": elapsed_sec,
+    }
+    row.update(params)
+    return row
+
+
+def _run_steer_one(
+    pipeline,
+    decoder,
+    baseline_joints: np.ndarray,
+    seed: int,
+    args,
+    delta_y: float,
+    alpha: float,
+    max_steer_ratio: float,
+) -> np.ndarray:
+    constraint = _build_constraint(args, baseline_joints, delta_y)
     steerer = FlowSteerer(
         pipeline=pipeline,
         decoder=decoder,
         constraints=constraint,
-        scheduler=args.scheduler_factory(alpha),
+        scheduler=StagedScheduler(alpha_max=alpha, mode="cosine", t_start=0.35, t_end=0.92),
         steps=args.steps,
         smooth_kernel=args.smooth_kernel,
         soft_norm_tau=args.soft_norm_tau,
@@ -137,54 +195,102 @@ def run_one(
         latent_mask_root_rot=args.latent_mask_root_rot,
         use_temporal_mask=not args.no_temporal_mask,
     )
-
     out = steerer.generate(
-        text=prompt,
+        text=args.prompt,
         seed_input=[seed],
-        duration_slider=duration,
+        duration_slider=args.duration,
         cfg_scale=args.cfg_scale,
     )
-    steered = pipeline_output_to_world_joints(out)[0]
+    return pipeline_output_to_world_joints(out)[0]
 
-    requested = float(np.linalg.norm([args.delta_x, delta_y, args.delta_z]))
-    achieved = _mean_delta_along(
-        baseline_joints,
-        steered,
-        joint_indices,
-        np.array([args.delta_x, delta_y, args.delta_z], dtype=np.float32),
-        args.t_start,
-        args.t_end,
+
+def _run_refine_one(
+    pipeline,
+    decoder,
+    baseline_out: dict,
+    baseline_joints: np.ndarray,
+    args,
+    delta_y: float,
+    steps: int,
+    lr: float,
+    constraint_weight: float,
+    joint_proximity: float,
+    smoothness: float,
+    delta_smoothness: float,
+) -> np.ndarray:
+    device = next(pipeline.parameters()).device
+    constraint = _build_constraint(args, baseline_joints, delta_y)
+    refiner = LatentRefiner(
+        decoder=decoder,
+        constraints=constraint,
+        steps=steps,
+        lr=lr,
+        constraint_weight=constraint_weight,
+        latent_proximity_weight=args.refine_latent_proximity,
+        delta_smoothness_weight=delta_smoothness,
+        joint_proximity_weight=joint_proximity,
+        smoothness_weight=smoothness,
+        max_delta=args.refine_max_delta,
+        apply_latent_mask=not args.no_latent_mask,
+        latent_mask_transl=args.latent_mask_transl,
+        latent_mask_root_rot=args.latent_mask_root_rot,
+        use_temporal_mask=not args.no_temporal_mask,
+        log_every=max(steps, 1),
+        verbose=False,
     )
+    latent0 = _denorm_latent_to_norm(pipeline, baseline_out["latent_denorm"], device)
+    result = refiner.refine(latent0)
+    out = pipeline.decode_motion_from_latent(result.latent, should_apply_smooothing=True)
+    return pipeline_output_to_world_joints(out)[0]
 
-    q_base = compute_quality_metrics(baseline_joints[None])
-    q_steer = compute_quality_metrics(steered[None])
-    foot_base = _foot_sliding_proxy(baseline_joints)
-    foot_steer = _foot_sliding_proxy(steered)
 
-    return {
-        "prompt": prompt,
-        "seed": seed,
-        "edit_joint": args.edit_joint,
-        "delta_y": delta_y,
-        "requested_delta_m": requested,
-        "alpha": alpha,
-        "max_steer_ratio": max_steer_ratio,
-        "achieved_delta_m": achieved,
-        "achievement_pct": achieved / (requested + 1e-8) * 100.0,
-        "jerk_ratio": q_steer.mean_jerk / (q_base.mean_jerk + 1e-9),
-        "foot_sliding_base": foot_base,
-        "foot_sliding_steered": foot_steer,
-        "foot_sliding_ratio": foot_steer / (foot_base + 1e-9),
-    }
+def _select_budget_rows(rows: Iterable[Dict], args) -> List[Dict]:
+    selected = []
+    grouped: Dict[tuple, List[Dict]] = {}
+    for row in rows:
+        key = (row["prompt"], row["seed"], row["delta_y"], row["method"])
+        grouped.setdefault(key, []).append(row)
+
+    for key, group in grouped.items():
+        feasible = [r for r in group if r["meets_budget"]]
+        if feasible:
+            best = min(
+                feasible,
+                key=lambda r: (
+                    abs(r["achievement_pct"] - args.target_achievement_pct),
+                    r["jerk_ratio"],
+                    r["elapsed_sec"],
+                ),
+            )
+            status = "target_and_quality"
+        else:
+            quality_ok = [r for r in group if r["meets_jerk_budget"]]
+            if quality_ok:
+                best = min(quality_ok, key=lambda r: abs(r["achievement_pct"] - args.target_achievement_pct))
+                status = "quality_feasible_closest"
+            else:
+                best = min(
+                    group,
+                    key=lambda r: (
+                        max(0.0, args.target_achievement_pct - r["achievement_pct"])
+                        + 10.0 * max(0.0, r["jerk_ratio"] - args.jerk_budget)
+                    ),
+                )
+                status = "closest_available"
+        out = dict(best)
+        out["selection_status"] = status
+        selected.append(out)
+    return selected
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Temporal attribute edit sweep")
+    parser = argparse.ArgumentParser(description="Temporal attribute edit evaluation")
     parser.add_argument("--model_path", required=True)
     parser.add_argument("--prompt", default="a person walks forward.")
     parser.add_argument("--duration", type=float, default=4.0)
     parser.add_argument("--seeds", default="43")
     parser.add_argument("--output_dir", default="output/attribute_sweep")
+    parser.add_argument("--method", default="both", choices=["steer", "refine", "both"])
     parser.add_argument("--edit_joint", default="right_arm", choices=sorted(_EDIT_JOINTS))
     parser.add_argument("--delta_x", type=float, default=0.0)
     parser.add_argument("--delta_y_values", default="0.20,0.35")
@@ -192,34 +298,45 @@ def main():
     parser.add_argument("--t_start", type=float, default=0.30)
     parser.add_argument("--t_end", type=float, default=0.70)
     parser.add_argument("--edge_frac", type=float, default=0.05)
-    parser.add_argument("--alpha_values", default="20,40,80")
-    parser.add_argument("--max_steer_ratios", default="0.3,0.6,1.0")
+    parser.add_argument("--target_achievement_pct", type=float, default=75.0)
+    parser.add_argument("--jerk_budget", type=float, default=2.0)
+
+    parser.add_argument("--alpha_values", default="20,80")
+    parser.add_argument("--max_steer_ratios", default="0.3,1.0")
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--smooth_kernel", type=int, default=7)
     parser.add_argument("--soft_norm_tau", type=float, default=0.1)
     parser.add_argument("--ema_momentum", type=float, default=0.7)
+
+    parser.add_argument("--refine_steps_values", default="40,100")
+    parser.add_argument("--refine_lr_values", default="0.05")
+    parser.add_argument("--refine_constraint_weights", default="10,20,40")
+    parser.add_argument("--refine_delta_smoothness_values", default="0.0,0.01")
+    parser.add_argument("--refine_joint_proximity_values", default="0.01,0.02")
+    parser.add_argument("--refine_smoothness_values", default="0.002,0.01")
+    parser.add_argument("--refine_latent_proximity", type=float, default=1e-3)
+    parser.add_argument("--refine_max_delta", type=float, default=3.0)
+
     parser.add_argument("--latent_mask_transl", type=float, default=0.1)
     parser.add_argument("--latent_mask_root_rot", type=float, default=0.3)
     parser.add_argument("--no_latent_mask", action="store_true")
     parser.add_argument("--no_temporal_mask", action="store_true")
     parser.add_argument("--cfg_scale", type=float, default=5.0)
     parser.add_argument("--gpu_id", type=int, default=0)
+    parser.add_argument("--save_best_npy", action="store_true")
     args = parser.parse_args()
-
-    from steering import StagedScheduler
-
-    args.scheduler_factory = lambda alpha: StagedScheduler(
-        alpha_max=alpha,
-        mode="cosine",
-        t_start=0.35,
-        t_end=0.92,
-    )
 
     os.makedirs(args.output_dir, exist_ok=True)
     seeds = [int(x) for x in args.seeds.split(",")]
     delta_y_values = _parse_floats(args.delta_y_values)
     alpha_values = _parse_floats(args.alpha_values)
     max_steer_ratios = _parse_floats(args.max_steer_ratios)
+    refine_steps_values = _parse_ints(args.refine_steps_values)
+    refine_lr_values = _parse_floats(args.refine_lr_values)
+    refine_constraint_weights = _parse_floats(args.refine_constraint_weights)
+    refine_delta_smoothness_values = _parse_floats(args.refine_delta_smoothness_values)
+    refine_joint_proximity_values = _parse_floats(args.refine_joint_proximity_values)
+    refine_smoothness_values = _parse_floats(args.refine_smoothness_values)
 
     device = torch.device(f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu")
     print("Loading HY-Motion pipeline...")
@@ -229,54 +346,127 @@ def main():
         body_model_path=os.path.join(_repo_root, "scripts/gradio/static/assets/dump_wooden"),
     )
 
+    run_steer = args.method in ("steer", "both")
+    run_refine = args.method in ("refine", "both")
     rows = []
+
     for seed in seeds:
         print(f"\nBaseline seed={seed}")
         with torch.no_grad():
-            base_out = pipeline.generate(
+            baseline_out = pipeline.generate(
                 text=args.prompt,
                 seed_input=[seed],
                 duration_slider=args.duration,
                 cfg_scale=args.cfg_scale,
             )
-        baseline = pipeline_output_to_world_joints(base_out)[0]
+        baseline = pipeline_output_to_world_joints(baseline_out)[0]
         np.save(os.path.join(args.output_dir, f"baseline_seed{seed}.npy"), baseline)
 
         for delta_y in delta_y_values:
-            for alpha in alpha_values:
-                for ratio in max_steer_ratios:
-                    t0 = time.time()
-                    row = run_one(
-                        pipeline=pipeline,
-                        decoder=decoder,
-                        baseline_joints=baseline,
-                        prompt=args.prompt,
-                        duration=args.duration,
-                        seed=seed,
-                        args=args,
-                        delta_y=delta_y,
-                        alpha=alpha,
-                        max_steer_ratio=ratio,
-                    )
-                    rows.append(row)
-                    print(
-                        f"  dy={delta_y:.2f} alpha={alpha:.1f} ratio={ratio:.2f} | "
-                        f"achieved={row['achieved_delta_m']:.3f}m "
-                        f"({row['achievement_pct']:.1f}%) | "
-                        f"jerk={row['jerk_ratio']:.3f} foot={row['foot_sliding_ratio']:.3f} "
-                        f"[{time.time() - t0:.1f}s]"
-                    )
+            if run_steer:
+                for alpha in alpha_values:
+                    for ratio in max_steer_ratios:
+                        t0 = time.time()
+                        edited = _run_steer_one(
+                            pipeline, decoder, baseline, seed, args, delta_y, alpha, ratio
+                        )
+                        row = _metrics_row(
+                            args,
+                            baseline,
+                            edited,
+                            seed,
+                            delta_y,
+                            "steer",
+                            {
+                                "alpha": alpha,
+                                "max_steer_ratio": ratio,
+                                "refine_steps": 0,
+                                "refine_lr": 0.0,
+                                            "refine_constraint_weight": 0.0,
+                                            "refine_delta_smoothness": 0.0,
+                                            "refine_joint_proximity": 0.0,
+                                "refine_smoothness": 0.0,
+                            },
+                            time.time() - t0,
+                        )
+                        rows.append(row)
+                        print(
+                            f"  steer  dy={delta_y:.2f} alpha={alpha:.1f} ratio={ratio:.2f} | "
+                            f"achieved={row['achieved_delta_m']:.3f}m "
+                            f"({row['achievement_pct']:.1f}%) | jerk={row['jerk_ratio']:.3f}"
+                        )
+
+            if run_refine:
+                for r_steps in refine_steps_values:
+                    for lr in refine_lr_values:
+                        for c_weight in refine_constraint_weights:
+                            for d_smooth in refine_delta_smoothness_values:
+                                for j_prox in refine_joint_proximity_values:
+                                    for smooth in refine_smoothness_values:
+                                        t0 = time.time()
+                                        edited = _run_refine_one(
+                                            pipeline,
+                                            decoder,
+                                            baseline_out,
+                                            baseline,
+                                            args,
+                                            delta_y,
+                                            r_steps,
+                                            lr,
+                                            c_weight,
+                                            j_prox,
+                                            smooth,
+                                            d_smooth,
+                                        )
+                                        row = _metrics_row(
+                                            args,
+                                            baseline,
+                                            edited,
+                                            seed,
+                                            delta_y,
+                                            "refine",
+                                            {
+                                                "alpha": 0.0,
+                                                "max_steer_ratio": 0.0,
+                                                "refine_steps": r_steps,
+                                                "refine_lr": lr,
+                                                "refine_constraint_weight": c_weight,
+                                                "refine_delta_smoothness": d_smooth,
+                                                "refine_joint_proximity": j_prox,
+                                                "refine_smoothness": smooth,
+                                            },
+                                            time.time() - t0,
+                                        )
+                                        rows.append(row)
+                                        print(
+                                            f"  refine dy={delta_y:.2f} steps={r_steps} cw={c_weight:.1f} "
+                                            f"ds={d_smooth:g} jp={j_prox:g} sm={smooth:g} | "
+                                            f"achieved={row['achieved_delta_m']:.3f}m "
+                                            f"({row['achievement_pct']:.1f}%) | jerk={row['jerk_ratio']:.3f}"
+                                        )
+
+    selected = _select_budget_rows(rows, args)
+    if args.save_best_npy:
+        # Keep the flag for future batch generation; best videos are better made
+        # with eval/visualize_attribute_edit.py from explicitly chosen rows.
+        print("[Note] --save_best_npy is reserved; rerun selected configs for paper videos.")
 
     json_path = os.path.join(args.output_dir, "results.json")
     csv_path = os.path.join(args.output_dir, "results.csv")
+    selected_path = os.path.join(args.output_dir, "selected.csv")
     with open(json_path, "w") as f:
         json.dump(rows, f, indent=2)
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
         writer.writeheader()
         writer.writerows(rows)
+    with open(selected_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(selected[0].keys()))
+        writer.writeheader()
+        writer.writerows(selected)
     print(f"\nSaved: {json_path}")
     print(f"Saved: {csv_path}")
+    print(f"Saved: {selected_path}")
 
 
 if __name__ == "__main__":
