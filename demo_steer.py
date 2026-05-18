@@ -30,6 +30,7 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import random
 from typing import Dict, List, Optional
@@ -45,6 +46,8 @@ from steering import (
     FlowSteerer,
     FootContactConstraint,
     JointReachConstraint,
+    LatentRefiner,
+    MotionDecoder,
     PoseConstraint,
     RootDisplacementScaleConstraint,
     StagedScheduler,
@@ -118,6 +121,15 @@ def pipeline_output_to_world_joints(output: dict) -> np.ndarray:
     k3d = output["keypoints3d"].numpy()
     transl = output["transl"].numpy()
     return k3d[:, :, :22, :] + transl[:, :, np.newaxis, :]
+
+
+def denorm_latent_to_norm(pipeline, latent_denorm: torch.Tensor, device: torch.device) -> torch.Tensor:
+    """Convert pipeline output latent_denorm back to normalized latent space."""
+    mean = pipeline.mean.to(device).view(1, 1, -1)
+    std = pipeline.std.to(device).view(1, 1, -1)
+    std_safe = std.clone()
+    std_safe[std_safe < 1e-3] = 1.0
+    return (latent_denorm.to(device) - mean) / std_safe
 
 
 def save_joints_npy(output_dir: str, tag: str, keypoints3d: np.ndarray):
@@ -350,6 +362,49 @@ def build_steerer(args, pipeline, constraints, scheduler):
     )
 
 
+def save_refine_history(output_dir: str, rows):
+    if not rows:
+        return
+    path = os.path.join(output_dir, "refine_history.csv")
+    with open(path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+    print(f"  Saved: {path}")
+
+
+def refine_baseline(args, pipeline, baseline_out, constraints, device):
+    decoder = MotionDecoder.from_stats_dir(
+        stats_dir=os.path.join(os.path.dirname(__file__), "stats"),
+        body_model_path=os.path.join(
+            os.path.dirname(__file__),
+            "scripts/gradio/static/assets/dump_wooden",
+        ),
+    )
+    refiner = LatentRefiner(
+        decoder=decoder,
+        constraints=constraints,
+        steps=args.refine_steps,
+        lr=args.refine_lr,
+        constraint_weight=args.refine_constraint_weight,
+        latent_proximity_weight=args.refine_latent_proximity,
+        joint_proximity_weight=args.refine_joint_proximity,
+        smoothness_weight=args.refine_smoothness,
+        max_delta=args.refine_max_delta,
+        apply_latent_mask=args.apply_latent_mask or args.edit_mode != "none" or ("pose" in args.constraint),
+        latent_mask_transl=args.latent_mask_transl,
+        latent_mask_root_rot=args.latent_mask_root_rot,
+        use_temporal_mask=not args.no_temporal_mask,
+        log_every=args.refine_log_every,
+        verbose=args.verbose,
+    )
+    latent0 = denorm_latent_to_norm(pipeline, baseline_out["latent_denorm"], device)
+    result = refiner.refine(latent0)
+    out = pipeline.decode_motion_from_latent(result.latent, should_apply_smooothing=True)
+    save_refine_history(args.output_dir, result.history)
+    return out
+
+
 def main():
     parser = argparse.ArgumentParser(description="FlowSteer-Motion demo")
     parser.add_argument("--model_path", required=True, help="Path to HY-Motion-1.0 ckpt dir")
@@ -357,6 +412,12 @@ def main():
     parser.add_argument("--duration", type=float, default=3.0, help="Duration in seconds")
     parser.add_argument("--seeds", default="42,43", help="Comma-separated steer seed list")
     parser.add_argument("--cfg_scale", type=float, default=5.0)
+    parser.add_argument(
+        "--method",
+        default="steer",
+        choices=["steer", "refine"],
+        help="steer: inference-time ODE steering; refine: post-sampling latent optimization.",
+    )
 
     parser.add_argument(
         "--edit_mode",
@@ -384,6 +445,14 @@ def main():
     parser.add_argument("--jerk_budget", type=float, default=2.0)
     parser.add_argument("--auto_alpha_values", default="20,40,80")
     parser.add_argument("--auto_max_steer_ratios", default="0.3,0.6,1.0")
+    parser.add_argument("--refine_steps", type=int, default=200)
+    parser.add_argument("--refine_lr", type=float, default=0.05)
+    parser.add_argument("--refine_constraint_weight", type=float, default=10.0)
+    parser.add_argument("--refine_latent_proximity", type=float, default=1e-3)
+    parser.add_argument("--refine_joint_proximity", type=float, default=0.02)
+    parser.add_argument("--refine_smoothness", type=float, default=0.01)
+    parser.add_argument("--refine_max_delta", type=float, default=3.0)
+    parser.add_argument("--refine_log_every", type=int, default=25)
 
     parser.add_argument(
         "--constraint",
@@ -477,7 +546,7 @@ def main():
     baseline_joints = pipeline_output_to_world_joints(baseline_out)
     save_joints_npy(args.output_dir, "baseline", baseline_joints)
 
-    print("Building steerer...")
+    print("Building constraints...")
     constraints = build_constraints(args, baseline_joints=baseline_joints, pose_target=pose_target_t)
 
     if args.edit_mode != "none":
@@ -495,7 +564,15 @@ def main():
             alpha_contact=args.alpha_max * 0.6,
         )
 
-    if args.auto_tune and args.edit_mode != "none":
+    if args.method == "refine":
+        print(
+            f"\nRefining baseline latent "
+            f"(steps={args.refine_steps}, lr={args.refine_lr}, "
+            f"constraint_weight={args.refine_constraint_weight})..."
+        )
+        steered_out = refine_baseline(args, pipeline, baseline_out, constraints, device)
+        steered_joints = pipeline_output_to_world_joints(steered_out)
+    elif args.auto_tune and args.edit_mode != "none":
         alpha_values = [float(x.strip()) for x in args.auto_alpha_values.split(",") if x.strip()]
         ratio_values = [float(x.strip()) for x in args.auto_max_steer_ratios.split(",") if x.strip()]
         base_jerk = _mean_jerk(baseline_joints)

@@ -17,12 +17,15 @@ from .constraints import (
     WaypointConstraint,
 )
 from .decode import MotionDecoder
+from .refine import LatentRefiner, RefinementResult
 from .scheduler import PerConstraintScheduler, StagedScheduler
 from .steerer import FlowSteerer
 
 __all__ = [
     "FlowSteerer",
+    "LatentRefiner",
     "MotionDecoder",
+    "RefinementResult",
     "CompositeConstraint",
     "END_EFFECTOR_JOINTS",
     "FootContactConstraint",
