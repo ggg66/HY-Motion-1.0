@@ -1,33 +1,38 @@
 """
 FlowSteer-Motion demo.
 
-Runs HY-Motion 1.0 with and without constraint steering, then saves results.
+The original pose-keyframe demo is kept, but the recommended path is now
+segment-level attribute editing via --edit_mode.  These edits expose user-level
+controls such as "raise the right hand by 0.35 m" instead of asking users to
+interpret a raw steering alpha.
 
 Examples:
     python demo_steer.py \
         --model_path ckpts/tencent/HY-Motion-1.0 \
-        --prompt "a person walks forward and stops" \
-        --duration 3.0 \
-        --constraint foot_contact \
-        --alpha_max 80 \
-        --output_dir output/steer_demo
+        --prompt "a person walks forward" \
+        --duration 4.0 \
+        --edit_mode raise_hand \
+        --edit_delta_y 0.35 \
+        --edit_t_start 0.30 --edit_t_end 0.70 \
+        --alpha_max 20 \
+        --output_dir output/raise_hand_demo
 
     python demo_steer.py \
         --model_path ckpts/tencent/HY-Motion-1.0 \
-        --prompt "a person walks forward and stops" \
+        --prompt "a person performs a side kick." \
         --duration 3.0 \
-        --constraint pose \
-        --target_seed 42 \
-        --seeds 43,44 \
-        --alpha_max 6 \
-        --use_hierarchical \
-        --output_dir output/pose_steer_demo
+        --edit_mode higher_kick \
+        --edit_delta_y 0.25 \
+        --alpha_max 24 \
+        --output_dir output/higher_kick_demo
 """
+
+from __future__ import annotations
 
 import argparse
 import os
 import random
-from typing import Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
@@ -39,8 +44,11 @@ from steering import (
     CompositeConstraint,
     FlowSteerer,
     FootContactConstraint,
+    JointReachConstraint,
     PoseConstraint,
+    RootDisplacementScaleConstraint,
     StagedScheduler,
+    TemporalJointOffsetConstraint,
     TerminalConstraint,
     UPPER_BODY_JOINTS,
 )
@@ -52,6 +60,18 @@ _JOINT_MASK_MAP = {
     "arms": ARM_JOINTS,
     "lower_body": [1, 2, 4, 5, 7, 8, 10, 11],
     "legs": [1, 2, 4, 5, 7, 8, 10, 11],
+}
+
+_EDIT_JOINTS: Dict[str, List[int]] = {
+    "left_wrist": [20],
+    "right_wrist": [21],
+    "both_wrists": [20, 21],
+    "left_arm": [18, 20],
+    "right_arm": [19, 21],
+    "both_arms": [18, 19, 20, 21],
+    "left_foot": [7, 10],
+    "right_foot": [8, 11],
+    "both_feet": [7, 8, 10, 11],
 }
 
 
@@ -100,7 +120,100 @@ def pipeline_output_to_world_joints(output: dict) -> np.ndarray:
     return k3d[:, :, :22, :] + transl[:, :, np.newaxis, :]
 
 
-def build_constraints(args, pose_target: Optional[torch.Tensor] = None) -> CompositeConstraint:
+def save_joints_npy(output_dir: str, tag: str, keypoints3d: np.ndarray):
+    """Save (B, T, J, 3) keypoints as .npy files."""
+    os.makedirs(output_dir, exist_ok=True)
+    for b in range(keypoints3d.shape[0]):
+        path = os.path.join(output_dir, f"{tag}_seed{b}.npy")
+        np.save(path, keypoints3d[b])
+        print(f"  Saved: {path}")
+
+
+def pose_hit_error(joints_np: np.ndarray, t_norm: float, target: np.ndarray, joint_mask) -> float:
+    """Mean L2 canonical pose error for one motion."""
+    T = joints_np.shape[0]
+    frame = int(round(t_norm * (T - 1)))
+    frame = max(0, min(frame, T - 1))
+    pred = canonicalize_frame_np(joints_np[frame])
+    if joint_mask is not None:
+        pred = pred[joint_mask]
+        target = target[joint_mask]
+    return float(np.linalg.norm(pred - target, axis=-1).mean())
+
+
+def _window_indices(T: int, t_start: float, t_end: float) -> np.ndarray:
+    lo = int(round(t_start * (T - 1)))
+    hi = int(round(t_end * (T - 1))) + 1
+    lo = max(0, min(lo, T - 1))
+    hi = max(lo + 1, min(hi, T))
+    return np.arange(lo, hi)
+
+
+def _mean_joint_delta(
+    baseline: np.ndarray,
+    steered: np.ndarray,
+    joint_indices: List[int],
+    direction: np.ndarray,
+    t_start: float,
+    t_end: float,
+) -> np.ndarray:
+    """Per-sample average displacement along direction in the edit window."""
+    idx = _window_indices(baseline.shape[1], t_start, t_end)
+    direction = direction / (np.linalg.norm(direction) + 1e-8)
+    delta = steered[:, idx][:, :, joint_indices, :] - baseline[:, idx][:, :, joint_indices, :]
+    return np.tensordot(delta, direction, axes=([-1], [0])).mean(axis=(1, 2))
+
+
+def _mean_jerk(joints: np.ndarray) -> float:
+    """Mean third finite difference magnitude over batch/time/joints."""
+    if joints.shape[1] < 4:
+        return 0.0
+    jerk = np.diff(joints, n=3, axis=1)
+    return float(np.linalg.norm(jerk, axis=-1).mean())
+
+
+def _edit_achievement(args, baseline_joints: np.ndarray, steered_joints: np.ndarray) -> np.ndarray:
+    """Return per-sample achievement percentage for edit modes with scalar targets."""
+    if args.edit_mode in ("raise_hand", "higher_kick"):
+        joint_indices = _EDIT_JOINTS[args.edit_joint]
+        direction = np.array([args.edit_delta_x, args.edit_delta_y, args.edit_delta_z], dtype=np.float32)
+        achieved = _mean_joint_delta(
+            baseline_joints,
+            steered_joints,
+            joint_indices,
+            direction,
+            args.edit_t_start,
+            args.edit_t_end,
+        )
+        target = np.linalg.norm(direction)
+        return achieved / (target + 1e-8) * 100.0
+
+    if args.edit_mode == "reach_hand":
+        joint_indices = _EDIT_JOINTS[args.edit_joint]
+        frame = int(round(args.edit_target_t * (baseline_joints.shape[1] - 1)))
+        source = baseline_joints[:, frame, joint_indices, :].mean(axis=(0, 1))
+        target = source + np.array([args.edit_delta_x, args.edit_delta_y, args.edit_delta_z], dtype=np.float32)
+        b_dist = np.linalg.norm(baseline_joints[:, frame][:, joint_indices, :] - target, axis=-1).mean(axis=1)
+        s_dist = np.linalg.norm(steered_joints[:, frame][:, joint_indices, :] - target, axis=-1).mean(axis=1)
+        return (b_dist - s_dist) / (b_dist + 1e-8) * 100.0
+
+    if args.edit_mode == "faster_root":
+        b = baseline_joints[:, -1, 0, [0, 2]] - baseline_joints[:, 0, 0, [0, 2]]
+        s = steered_joints[:, -1, 0, [0, 2]] - steered_joints[:, 0, 0, [0, 2]]
+        b_len = np.linalg.norm(b, axis=-1)
+        s_len = np.linalg.norm(s, axis=-1)
+        requested = max(args.root_scale - 1.0, 1e-8)
+        achieved = (s_len / (b_len + 1e-8)) - 1.0
+        return achieved / requested * 100.0
+
+    return np.zeros((baseline_joints.shape[0],), dtype=np.float32)
+
+
+def build_constraints(
+    args,
+    baseline_joints: np.ndarray,
+    pose_target: Optional[torch.Tensor] = None,
+) -> CompositeConstraint:
     constraint_list = []
 
     if "foot_contact" in args.constraint:
@@ -126,29 +239,115 @@ def build_constraints(args, pose_target: Optional[torch.Tensor] = None) -> Compo
         )
         constraint_list.append((pc, 1.0))
 
-    assert constraint_list, f"No constraints built from: {args.constraint}"
-    return CompositeConstraint(constraint_list)
+    if args.edit_mode in ("raise_hand", "higher_kick"):
+        joint_indices = _EDIT_JOINTS[args.edit_joint]
+        offset = torch.tensor(
+            [args.edit_delta_x, args.edit_delta_y, args.edit_delta_z],
+            dtype=torch.float32,
+        )
+        c = TemporalJointOffsetConstraint(
+            reference_joints=torch.from_numpy(baseline_joints).float(),
+            joint_indices=joint_indices,
+            offset_xyz=offset,
+            t_start=args.edit_t_start,
+            t_end=args.edit_t_end,
+            edge_frac=args.edit_edge_frac,
+        )
+        constraint_list.append((c, args.edit_weight))
+
+    elif args.edit_mode == "reach_hand":
+        joint_indices = _EDIT_JOINTS[args.edit_joint]
+        frame = int(round(args.edit_target_t * (baseline_joints.shape[1] - 1)))
+        source = baseline_joints[:, frame, joint_indices, :].mean(axis=(0, 1))
+        target = source + np.array(
+            [args.edit_delta_x, args.edit_delta_y, args.edit_delta_z],
+            dtype=np.float32,
+        )
+        c = JointReachConstraint(
+            target_xyz=torch.from_numpy(target).float(),
+            joint_indices=joint_indices,
+            t_start=args.edit_t_start,
+            t_end=args.edit_t_end,
+            edge_frac=args.edit_edge_frac,
+        )
+        constraint_list.append((c, args.edit_weight))
+
+    elif args.edit_mode == "faster_root":
+        c = RootDisplacementScaleConstraint(
+            reference_joints=torch.from_numpy(baseline_joints).float(),
+            scale=args.root_scale,
+            t_start=args.edit_t_start,
+            t_end=args.edit_t_end,
+            edge_frac=args.edit_edge_frac,
+        )
+        constraint_list.append((c, args.edit_weight))
+
+    assert constraint_list, f"No constraints built from constraint={args.constraint}, edit_mode={args.edit_mode}"
+    return CompositeConstraint(constraint_list, normalize_losses=args.normalize_losses)
 
 
-def save_joints_npy(output_dir: str, tag: str, keypoints3d: np.ndarray):
-    """Save (B, T, J, 3) keypoints as .npy files."""
-    os.makedirs(output_dir, exist_ok=True)
-    for b in range(keypoints3d.shape[0]):
-        path = os.path.join(output_dir, f"{tag}_seed{b}.npy")
-        np.save(path, keypoints3d[b])
-        print(f"  Saved: {path}")
+def print_edit_metrics(args, baseline_joints: np.ndarray, steered_joints: np.ndarray):
+    if args.edit_mode in ("raise_hand", "higher_kick"):
+        joint_indices = _EDIT_JOINTS[args.edit_joint]
+        direction = np.array([args.edit_delta_x, args.edit_delta_y, args.edit_delta_z], dtype=np.float32)
+        achieved = _mean_joint_delta(
+            baseline_joints,
+            steered_joints,
+            joint_indices,
+            direction,
+            args.edit_t_start,
+            args.edit_t_end,
+        )
+        target = np.linalg.norm(direction)
+        print("\n--- Temporal attribute edit ---")
+        for i, value in enumerate(achieved):
+            pct = value / (target + 1e-8) * 100.0
+            print(f"  sample {i:2d} | target delta={target:.3f} m | achieved={value:.3f} m ({pct:.1f}%)")
+
+    elif args.edit_mode == "reach_hand":
+        joint_indices = _EDIT_JOINTS[args.edit_joint]
+        frame = int(round(args.edit_target_t * (baseline_joints.shape[1] - 1)))
+        source = baseline_joints[:, frame, joint_indices, :].mean(axis=(0, 1))
+        target = source + np.array([args.edit_delta_x, args.edit_delta_y, args.edit_delta_z], dtype=np.float32)
+        b_dist = np.linalg.norm(baseline_joints[:, frame][:, joint_indices, :] - target, axis=-1).mean(axis=1)
+        s_dist = np.linalg.norm(steered_joints[:, frame][:, joint_indices, :] - target, axis=-1).mean(axis=1)
+        print("\n--- Reach edit ---")
+        for i, (b, s) in enumerate(zip(b_dist, s_dist)):
+            imp = (b - s) / (b + 1e-8) * 100.0
+            print(f"  sample {i:2d} | reach error {b:.3f} -> {s:.3f} m ({imp:+.1f}%)")
+
+    elif args.edit_mode == "faster_root":
+        b = baseline_joints[:, -1, 0, [0, 2]] - baseline_joints[:, 0, 0, [0, 2]]
+        s = steered_joints[:, -1, 0, [0, 2]] - steered_joints[:, 0, 0, [0, 2]]
+        b_len = np.linalg.norm(b, axis=-1)
+        s_len = np.linalg.norm(s, axis=-1)
+        print("\n--- Root displacement edit ---")
+        for i, (bv, sv) in enumerate(zip(b_len, s_len)):
+            print(f"  sample {i:2d} | root distance {bv:.3f} -> {sv:.3f} m (target scale {args.root_scale:.2f})")
 
 
-def pose_hit_error(joints_np: np.ndarray, t_norm: float, target: np.ndarray, joint_mask) -> float:
-    """Mean L2 canonical pose error for one motion."""
-    T = joints_np.shape[0]
-    frame = int(round(t_norm * (T - 1)))
-    frame = max(0, min(frame, T - 1))
-    pred = canonicalize_frame_np(joints_np[frame])
-    if joint_mask is not None:
-        pred = pred[joint_mask]
-        target = target[joint_mask]
-    return float(np.linalg.norm(pred - target, axis=-1).mean())
+def build_steerer(args, pipeline, constraints, scheduler):
+    pose_like_edit = args.edit_mode in ("raise_hand", "higher_kick", "reach_hand")
+    return FlowSteerer.from_pipeline(
+        pipeline=pipeline,
+        stats_dir=os.path.join(os.path.dirname(__file__), "stats"),
+        body_model_path=os.path.join(
+            os.path.dirname(__file__),
+            "scripts/gradio/static/assets/dump_wooden",
+        ),
+        constraints=constraints,
+        scheduler=scheduler,
+        steps=args.steps,
+        smooth_kernel=args.smooth_kernel,
+        soft_norm_tau=args.soft_norm_tau,
+        max_steer_ratio=args.max_steer_ratio,
+        ema_momentum=args.ema_momentum,
+        apply_latent_mask=args.apply_latent_mask or ("pose" in args.constraint) or pose_like_edit,
+        latent_mask_transl=args.latent_mask_transl,
+        latent_mask_root_rot=args.latent_mask_root_rot,
+        use_temporal_mask=not args.no_temporal_mask,
+        verbose=args.verbose,
+    )
 
 
 def main():
@@ -158,16 +357,44 @@ def main():
     parser.add_argument("--duration", type=float, default=3.0, help="Duration in seconds")
     parser.add_argument("--seeds", default="42,43", help="Comma-separated steer seed list")
     parser.add_argument("--cfg_scale", type=float, default=5.0)
+
+    parser.add_argument(
+        "--edit_mode",
+        default="none",
+        choices=["none", "raise_hand", "higher_kick", "reach_hand", "faster_root"],
+        help="User-level temporal edit. Prefer this over raw pose keyframes for visible demos.",
+    )
+    parser.add_argument("--edit_joint", default=None, help="Joint group for edit_mode")
+    parser.add_argument("--edit_delta_x", type=float, default=0.0)
+    parser.add_argument("--edit_delta_y", type=float, default=0.35)
+    parser.add_argument("--edit_delta_z", type=float, default=0.0)
+    parser.add_argument("--edit_t_start", type=float, default=0.30)
+    parser.add_argument("--edit_t_end", type=float, default=0.70)
+    parser.add_argument("--edit_target_t", type=float, default=0.50)
+    parser.add_argument("--edit_edge_frac", type=float, default=0.05)
+    parser.add_argument("--edit_weight", type=float, default=1.0)
+    parser.add_argument("--root_scale", type=float, default=1.3)
+    parser.add_argument("--normalize_losses", action="store_true")
+    parser.add_argument(
+        "--auto_tune",
+        action="store_true",
+        help="Try a small alpha/trust-region grid and select the best edit under a jerk budget.",
+    )
+    parser.add_argument("--target_achievement_pct", type=float, default=60.0)
+    parser.add_argument("--jerk_budget", type=float, default=2.0)
+    parser.add_argument("--auto_alpha_values", default="20,40,80")
+    parser.add_argument("--auto_max_steer_ratios", default="0.3,0.6,1.0")
+
     parser.add_argument(
         "--constraint",
         nargs="+",
-        default=["foot_contact"],
+        default=[],
         choices=["foot_contact", "terminal", "pose"],
-        help="Which constraints to apply",
+        help="Legacy low-level constraints to apply in addition to edit_mode.",
     )
     parser.add_argument("--terminal_x", type=float, default=2.0)
     parser.add_argument("--terminal_z", type=float, default=0.0)
-    parser.add_argument("--alpha_max", type=float, default=80.0, help="Steering strength")
+    parser.add_argument("--alpha_max", type=float, default=None, help="Internal steering strength")
     parser.add_argument("--target_seed", type=int, default=42, help="Reference seed for pose targets")
     parser.add_argument("--pose_t", type=float, default=0.5, help="Normalized pose keyframe time")
     parser.add_argument(
@@ -182,15 +409,34 @@ def main():
     parser.add_argument("--latent_mask_root_rot", type=float, default=0.3)
     parser.add_argument("--no_temporal_mask", action="store_true")
     parser.add_argument("--steps", type=int, default=50, help="Euler steps")
+    parser.add_argument("--smooth_kernel", type=int, default=7)
+    parser.add_argument("--soft_norm_tau", type=float, default=0.1)
+    parser.add_argument("--max_steer_ratio", type=float, default=0.3)
+    parser.add_argument("--ema_momentum", type=float, default=0.7)
     parser.add_argument("--scheduler", default="cosine", choices=["constant", "cosine", "staged"])
     parser.add_argument("--gpu_id", type=int, default=0)
     parser.add_argument("--output_dir", default="output/steer_demo")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args()
 
-    if "pose" in args.constraint and args.alpha_max == 80.0:
+    if args.edit_joint is None:
+        if args.edit_mode == "higher_kick":
+            args.edit_joint = "right_foot"
+        elif args.edit_mode in ("raise_hand", "reach_hand"):
+            args.edit_joint = "right_arm"
+        else:
+            args.edit_joint = "right_wrist"
+    if args.edit_joint not in _EDIT_JOINTS:
+        raise ValueError(f"Unknown --edit_joint {args.edit_joint!r}; choices: {sorted(_EDIT_JOINTS)}")
+
+    if args.alpha_max is None and args.edit_mode != "none":
+        args.alpha_max = 20.0
+        print("[Note] Using alpha_max=20.0 for temporal attribute editing. Pass --alpha_max to override.")
+    if args.alpha_max is None and "pose" in args.constraint:
         args.alpha_max = 6.0
         print("[Note] Using alpha_max=6.0 for pose steering. Pass --alpha_max to override.")
+    if args.alpha_max is None:
+        args.alpha_max = 80.0
 
     device = torch.device(f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu")
     seeds = [int(s) for s in args.seeds.split(",")]
@@ -218,39 +464,6 @@ def main():
         pose_target_np = canonicalize_frame_np(target_joints[0, target_frame])
         pose_target_t = torch.from_numpy(pose_target_np).float()
 
-    print("Building steerer...")
-    constraints = build_constraints(args, pose_target=pose_target_t)
-
-    if set(args.constraint) == {"pose"}:
-        scheduler = StagedScheduler(alpha_max=args.alpha_max, mode="cosine", t_start=0.5, t_end=0.88)
-    elif args.scheduler == "cosine":
-        scheduler = StagedScheduler.cosine(alpha_max=args.alpha_max)
-    elif args.scheduler == "constant":
-        scheduler = StagedScheduler.constant(alpha_max=args.alpha_max)
-    else:
-        scheduler = StagedScheduler.make_staged(
-            alpha_terminal=args.alpha_max,
-            alpha_waypoint=args.alpha_max * 0.8,
-            alpha_contact=args.alpha_max * 0.6,
-        )
-
-    steerer = FlowSteerer.from_pipeline(
-        pipeline=pipeline,
-        stats_dir=os.path.join(os.path.dirname(__file__), "stats"),
-        body_model_path=os.path.join(
-            os.path.dirname(__file__),
-            "scripts/gradio/static/assets/dump_wooden",
-        ),
-        constraints=constraints,
-        scheduler=scheduler,
-        steps=args.steps,
-        apply_latent_mask=args.apply_latent_mask or ("pose" in args.constraint),
-        latent_mask_transl=args.latent_mask_transl,
-        latent_mask_root_rot=args.latent_mask_root_rot,
-        use_temporal_mask=not args.no_temporal_mask,
-        verbose=args.verbose,
-    )
-
     os.makedirs(args.output_dir, exist_ok=True)
 
     print("\nGenerating baseline (no steering)...")
@@ -264,15 +477,95 @@ def main():
     baseline_joints = pipeline_output_to_world_joints(baseline_out)
     save_joints_npy(args.output_dir, "baseline", baseline_joints)
 
-    print(f"\nGenerating with steering (alpha={args.alpha_max}, steps={args.steps})...")
-    steered_out = steerer.generate(
-        text=args.prompt,
-        seed_input=seeds,
-        duration_slider=args.duration,
-        cfg_scale=args.cfg_scale,
-    )
-    steered_joints = pipeline_output_to_world_joints(steered_out)
+    print("Building steerer...")
+    constraints = build_constraints(args, baseline_joints=baseline_joints, pose_target=pose_target_t)
+
+    if args.edit_mode != "none":
+        scheduler = StagedScheduler(alpha_max=args.alpha_max, mode="cosine", t_start=0.35, t_end=0.92)
+    elif set(args.constraint) == {"pose"}:
+        scheduler = StagedScheduler(alpha_max=args.alpha_max, mode="cosine", t_start=0.5, t_end=0.88)
+    elif args.scheduler == "cosine":
+        scheduler = StagedScheduler.cosine(alpha_max=args.alpha_max)
+    elif args.scheduler == "constant":
+        scheduler = StagedScheduler.constant(alpha_max=args.alpha_max)
+    else:
+        scheduler = StagedScheduler.make_staged(
+            alpha_terminal=args.alpha_max,
+            alpha_waypoint=args.alpha_max * 0.8,
+            alpha_contact=args.alpha_max * 0.6,
+        )
+
+    if args.auto_tune and args.edit_mode != "none":
+        alpha_values = [float(x.strip()) for x in args.auto_alpha_values.split(",") if x.strip()]
+        ratio_values = [float(x.strip()) for x in args.auto_max_steer_ratios.split(",") if x.strip()]
+        base_jerk = _mean_jerk(baseline_joints)
+        candidates = []
+        print("\nAuto-tuning steering parameters...")
+        for alpha in alpha_values:
+            for ratio in ratio_values:
+                args.alpha_max = alpha
+                args.max_steer_ratio = ratio
+                trial_scheduler = StagedScheduler(alpha_max=alpha, mode="cosine", t_start=0.35, t_end=0.92)
+                trial_steerer = build_steerer(args, pipeline, constraints, trial_scheduler)
+                print(f"  trial alpha={alpha:.1f}, max_steer_ratio={ratio:.2f}")
+                trial_out = trial_steerer.generate(
+                    text=args.prompt,
+                    seed_input=seeds,
+                    duration_slider=args.duration,
+                    cfg_scale=args.cfg_scale,
+                )
+                trial_joints = pipeline_output_to_world_joints(trial_out)
+                achievement = _edit_achievement(args, baseline_joints, trial_joints)
+                jerk_ratio = _mean_jerk(trial_joints) / (base_jerk + 1e-9)
+                mean_achievement = float(achievement.mean())
+                meets = mean_achievement >= args.target_achievement_pct and jerk_ratio <= args.jerk_budget
+                within_quality = jerk_ratio <= args.jerk_budget
+                if meets:
+                    # Best case: hit the requested edit while staying under the quality budget.
+                    tier = 0
+                    score = abs(mean_achievement - args.target_achievement_pct) + 5.0 * max(0.0, jerk_ratio - 1.0)
+                elif within_quality:
+                    # Preserve quality first, then get as close as possible to the target edit.
+                    tier = 1
+                    score = abs(args.target_achievement_pct - mean_achievement)
+                else:
+                    # Last resort: no quality-feasible candidate exists.
+                    tier = 2
+                    score = (
+                        max(0.0, args.target_achievement_pct - mean_achievement)
+                        + 10.0 * max(0.0, jerk_ratio - args.jerk_budget)
+                    )
+                print(f"    achievement={mean_achievement:.1f}% jerk={jerk_ratio:.3f} score={score:.2f}")
+                candidates.append((tier, score, meets, within_quality, mean_achievement, jerk_ratio, alpha, ratio, trial_joints))
+
+        candidates.sort(key=lambda x: x[0])
+        _, _, meets, within_quality, mean_achievement, jerk_ratio, best_alpha, best_ratio, steered_joints = candidates[0]
+        args.alpha_max = best_alpha
+        args.max_steer_ratio = best_ratio
+        if meets:
+            status = "met target and quality budget"
+        elif within_quality:
+            status = "quality-feasible closest target"
+        else:
+            status = "closest available; quality budget unmet"
+        print(
+            f"\nAuto-tune selected alpha={best_alpha:.1f}, max_steer_ratio={best_ratio:.2f} "
+            f"({status}; achievement={mean_achievement:.1f}%, jerk={jerk_ratio:.3f})"
+        )
+    else:
+        steerer = build_steerer(args, pipeline, constraints, scheduler)
+        print(f"\nGenerating with steering (alpha={args.alpha_max}, steps={args.steps})...")
+        steered_out = steerer.generate(
+            text=args.prompt,
+            seed_input=seeds,
+            duration_slider=args.duration,
+            cfg_scale=args.cfg_scale,
+        )
+        steered_joints = pipeline_output_to_world_joints(steered_out)
+
     save_joints_npy(args.output_dir, "steered", steered_joints)
+
+    print_edit_metrics(args, baseline_joints, steered_joints)
 
     if "pose" in args.constraint:
         print("\n--- Pose keyframe comparison ---")

@@ -24,6 +24,28 @@ from torch import Tensor
 from .decode import FOOT_JOINTS, ROOT_JOINT
 
 
+def _temporal_window(
+    T: int,
+    device,
+    t_start: float,
+    t_end: float,
+    edge_frac: float = 0.05,
+) -> Tensor:
+    """
+    Smooth box window over normalised time.
+
+    Returns a (T,) tensor in [0, 1].  A soft-edged window is preferable to a
+    hard slice because the gradient then tapers smoothly around the edit
+    boundaries instead of creating visible discontinuities.
+    """
+    t = torch.arange(T, device=device, dtype=torch.float32) / max(T - 1, 1)
+    edge = max(1e-4, edge_frac)
+    left = torch.sigmoid((t - float(t_start)) / edge)
+    right = torch.sigmoid((float(t_end) - t) / edge)
+    w = left * right
+    return w / w.max().clamp(min=1e-8)
+
+
 # ---------------------------------------------------------------------------
 # Base
 # ---------------------------------------------------------------------------
@@ -324,6 +346,154 @@ class FootContactConstraint(BaseConstraint):
         height_loss = (contact * rel_height[:, :-1]).mean()
 
         return vel_loss + height_loss
+
+
+# ---------------------------------------------------------------------------
+# Temporal attribute / edit constraints
+# ---------------------------------------------------------------------------
+
+class TemporalJointOffsetConstraint(BaseConstraint):
+    """
+    Move selected joints by a user-specified 3D offset over a time interval.
+
+    This is a segment-level edit primitive, not a single-frame pose match.
+    The target is defined relative to a reference motion, usually the
+    unsteered baseline generated from the same seed:
+
+        target_joints[t, j] = reference_joints[t, j] + offset_xyz
+
+    Examples:
+        - raise the right wrist by +0.35 m from 30%-70% of the motion
+        - move both wrists outward during a wave gesture
+        - lift the kicking foot higher in the kick window
+
+    Args:
+        reference_joints: (T, 22, 3) world-space joints from the baseline.
+        joint_indices: selected joints to edit.
+        offset_xyz: (3,) offset in metres, applied in world coordinates.
+        t_start/t_end: normalised edit window.
+        edge_frac: soft boundary width as a fraction of the sequence.
+    """
+
+    def __init__(
+        self,
+        reference_joints: Tensor,
+        joint_indices: List[int],
+        offset_xyz: Tensor,
+        t_start: float = 0.3,
+        t_end: float = 0.7,
+        edge_frac: float = 0.05,
+        weight: float = 1.0,
+    ):
+        self.reference_joints = reference_joints.float()
+        self.joint_indices = joint_indices
+        self.offset_xyz = offset_xyz.float()
+        self.t_start = float(t_start)
+        self.t_end = float(t_end)
+        self.edge_frac = float(edge_frac)
+        self.weight = weight
+
+    def loss(self, joints: Tensor) -> Tensor:
+        B, T, _, _ = joints.shape
+        device = joints.device
+        ref = self.reference_joints.to(device)
+        if ref.ndim == 3:
+            ref = ref.unsqueeze(0)
+        if ref.shape[0] == 1 and B > 1:
+            ref = ref.expand(B, -1, -1, -1)
+        ref = ref[:, :T, :, :]
+        target = ref[:, :, self.joint_indices, :] + self.offset_xyz.to(device).view(1, 1, 1, 3)
+        pred = joints[:, :, self.joint_indices, :]
+        w = _temporal_window(T, device, self.t_start, self.t_end, self.edge_frac)
+        diff = (pred - target.detach()) ** 2
+        return (w.view(1, T, 1, 1) * diff).sum() / (B * len(self.joint_indices) * 3 * w.sum().clamp(min=1e-8))
+
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        return _temporal_window(T, device, self.t_start, self.t_end, self.edge_frac)
+
+
+class RootDisplacementScaleConstraint(BaseConstraint):
+    """
+    Scale the baseline root XZ displacement over the whole motion or a segment.
+
+    This gives a user-level control such as "walk 30% farther" without asking
+    the user to tune alpha.  The target trajectory is:
+
+        target_xz[t] = root_xz[0] + scale * (baseline_root_xz[t] - baseline_root_xz[0])
+    """
+
+    def __init__(
+        self,
+        reference_joints: Tensor,
+        scale: float = 1.3,
+        t_start: float = 0.0,
+        t_end: float = 1.0,
+        edge_frac: float = 0.05,
+        weight: float = 1.0,
+    ):
+        self.reference_joints = reference_joints.float()
+        self.scale = float(scale)
+        self.t_start = float(t_start)
+        self.t_end = float(t_end)
+        self.edge_frac = float(edge_frac)
+        self.weight = weight
+
+    def loss(self, joints: Tensor) -> Tensor:
+        B, T, _, _ = joints.shape
+        device = joints.device
+        ref = self.reference_joints.to(device)
+        if ref.ndim == 3:
+            ref = ref.unsqueeze(0)
+        if ref.shape[0] == 1 and B > 1:
+            ref = ref.expand(B, -1, -1, -1)
+        ref_root = ref[:, :T, ROOT_JOINT, [0, 2]]
+        ref_start = ref_root[:, :1, :]
+        target = ref_start + self.scale * (ref_root - ref_start)
+        pred = joints[:, :, ROOT_JOINT, [0, 2]]
+        w = _temporal_window(T, device, self.t_start, self.t_end, self.edge_frac)
+        diff = (pred - target.detach()) ** 2
+        return (w.view(1, T, 1) * diff).sum() / (B * 2 * w.sum().clamp(min=1e-8))
+
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        return _temporal_window(T, device, self.t_start, self.t_end, self.edge_frac)
+
+
+class JointReachConstraint(BaseConstraint):
+    """
+    Move one or more joints toward a fixed world-space target over a segment.
+
+    Useful for interaction-style edits such as "right hand reaches this point".
+    For a single key moment, set t_start and t_end close together; for a hold
+    or reach interval, use a wider window.
+    """
+
+    def __init__(
+        self,
+        target_xyz: Tensor,
+        joint_indices: List[int],
+        t_start: float = 0.45,
+        t_end: float = 0.55,
+        edge_frac: float = 0.04,
+        weight: float = 1.0,
+    ):
+        self.target_xyz = target_xyz.float()
+        self.joint_indices = joint_indices
+        self.t_start = float(t_start)
+        self.t_end = float(t_end)
+        self.edge_frac = float(edge_frac)
+        self.weight = weight
+
+    def loss(self, joints: Tensor) -> Tensor:
+        B, T, _, _ = joints.shape
+        device = joints.device
+        pred = joints[:, :, self.joint_indices, :]
+        target = self.target_xyz.to(device).view(1, 1, 1, 3)
+        w = _temporal_window(T, device, self.t_start, self.t_end, self.edge_frac)
+        diff = (pred - target) ** 2
+        return (w.view(1, T, 1, 1) * diff).sum() / (B * len(self.joint_indices) * 3 * w.sum().clamp(min=1e-8))
+
+    def temporal_mask(self, T: int, device) -> Optional[Tensor]:
+        return _temporal_window(T, device, self.t_start, self.t_end, self.edge_frac)
 
 
 # ---------------------------------------------------------------------------
