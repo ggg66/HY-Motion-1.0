@@ -233,7 +233,11 @@ def _run_refine_one(
     delta_smoothness: float,
 ) -> np.ndarray:
     device = next(pipeline.parameters()).device
-    constraint = _build_constraint(args, baseline_joints, delta_y)
+    latent0 = _denorm_latent_to_norm(pipeline, baseline_out["latent_denorm"], device)
+    decoder.to(device)
+    with torch.no_grad():
+        reference_joints = decoder(latent0).detach().cpu().numpy()[0]
+    constraint = _build_constraint(args, reference_joints, delta_y)
     refiner = LatentRefiner(
         decoder=decoder,
         constraints=constraint,
@@ -252,7 +256,6 @@ def _run_refine_one(
         log_every=max(steps, 1),
         verbose=False,
     )
-    latent0 = _denorm_latent_to_norm(pipeline, baseline_out["latent_denorm"], device)
     result = refiner.refine(latent0)
     out = pipeline.decode_motion_from_latent(result.latent, should_apply_smooothing=True)
     return pipeline_output_to_world_joints(out)[0]

@@ -373,7 +373,7 @@ def save_refine_history(output_dir: str, rows):
     print(f"  Saved: {path}")
 
 
-def refine_baseline(args, pipeline, baseline_out, constraints, device):
+def refine_baseline(args, pipeline, baseline_out, pose_target, device):
     decoder = MotionDecoder.from_stats_dir(
         stats_dir=os.path.join(os.path.dirname(__file__), "stats"),
         body_model_path=os.path.join(
@@ -381,6 +381,11 @@ def refine_baseline(args, pipeline, baseline_out, constraints, device):
             "scripts/gradio/static/assets/dump_wooden",
         ),
     )
+    latent0 = denorm_latent_to_norm(pipeline, baseline_out["latent_denorm"], device)
+    decoder.to(device)
+    with torch.no_grad():
+        reference_joints = decoder(latent0).detach().cpu().numpy()
+    constraints = build_constraints(args, baseline_joints=reference_joints, pose_target=pose_target)
     refiner = LatentRefiner(
         decoder=decoder,
         constraints=constraints,
@@ -399,7 +404,6 @@ def refine_baseline(args, pipeline, baseline_out, constraints, device):
         log_every=args.refine_log_every,
         verbose=args.verbose,
     )
-    latent0 = denorm_latent_to_norm(pipeline, baseline_out["latent_denorm"], device)
     result = refiner.refine(latent0)
     out = pipeline.decode_motion_from_latent(result.latent, should_apply_smooothing=True)
     save_refine_history(args.output_dir, result.history)
@@ -572,7 +576,7 @@ def main():
             f"(steps={args.refine_steps}, lr={args.refine_lr}, "
             f"constraint_weight={args.refine_constraint_weight})..."
         )
-        steered_out = refine_baseline(args, pipeline, baseline_out, constraints, device)
+        steered_out = refine_baseline(args, pipeline, baseline_out, pose_target_t, device)
         steered_joints = pipeline_output_to_world_joints(steered_out)
     elif args.auto_tune and args.edit_mode != "none":
         alpha_values = [float(x.strip()) for x in args.auto_alpha_values.split(",") if x.strip()]
