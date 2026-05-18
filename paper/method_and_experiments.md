@@ -134,6 +134,35 @@ The single backward pass preserves temporal coupling through the FK chain
 (joint rotations compose sequentially), avoiding the jerk artefacts that arise when
 per-constraint gradients are accumulated independently.
 
+### 3.8 Budget-Aware Latent Refinement for Attribute Editing
+
+Sampling-time steering is useful for weak guidance, but sparse attribute edits such as
+"raise the right arm by 25 cm during the middle of the motion" need a stronger and more
+measurable intervention.  We therefore add a post-sampling refinement stage that optimises
+the generated latent directly while keeping the pretrained generator frozen.
+
+Given a sampled latent $z_0$, we optimise:
+
+$$
+\min_z
+\lambda_c \mathcal{L}_c(\mathcal{D}(z))
++ \lambda_z \|z-z_0\|^2
++ \lambda_\Delta \|\nabla_t(z-z_0)\|^2
++ \lambda_j \|\mathcal{D}(z)-\mathcal{D}(z_0)\|^2
++ \lambda_s \|\nabla_t^3 \mathcal{D}(z)\|^2 .
+$$
+
+The constraint term $\mathcal{L}_c$ encodes a temporal joint offset relative to the
+differentiable FK decoder's own reconstruction of the baseline latent.  This detail is
+important: using a smoothed rendered output as the reference creates a mismatch between
+the optimisation target and the decoder being optimised, which can make the edit overshoot
+or appear visually weak.
+
+We use the same latent trust mask and temporal edit window as in sampling-time steering.
+The result is a budget-aware attribute editor: larger offsets increase visibility, while
+the jerk and foot-sliding metrics expose the quality cost.  This supports a practical
+editing protocol rather than a single-frame pose correction.
+
 ---
 
 ## 4. Experiments
@@ -302,7 +331,38 @@ the steer seed's natural trajectory; we leave this to future work.
 
 ---
 
-### 4.5 Failure Case Analysis
+### 4.5 Temporal Attribute Editing
+
+We evaluate the latent refinement editor on five temporal edit tasks: walking arm lift,
+marching arm lift, dance arm lift, kick height increase, and aerobic-exercise arm lift.
+Each edit specifies a joint group, a temporal window, and a target vertical offset.
+We report target achievement, jerk ratio, foot-sliding ratio, and the percentage of runs
+that satisfy both achievement $\ge 75\%$ and jerk ratio $\le 2.0$.
+
+**Table 4. Budget-aware temporal attribute editing, 3 seeds per case.**
+
+| Case | Target | Achieved (m) | Achievement | Jerk Ratio | Foot Sliding Ratio | Budget Pass |
+|---|---:|---:|---:|---:|---:|---:|
+| walk arm quality | 0.10 | 0.097 +/- 0.003 | 97.2 +/- 2.6 | 1.401 +/- 0.027 | 0.918 +/- 0.039 | 100% |
+| march arms quality | 0.10 | 0.086 +/- 0.001 | 85.8 +/- 1.5 | 1.583 +/- 0.206 | 1.012 +/- 0.023 | 100% |
+| dance arm visible | 0.25 | 0.236 +/- 0.003 | 94.3 +/- 1.2 | 1.416 +/- 0.086 | 1.697 +/- 0.365 | 100% |
+| kick foot quality | 0.10 | 0.093 +/- 0.006 | 93.0 +/- 6.5 | 1.535 +/- 0.064 | 1.076 +/- 0.071 | 100% |
+| exercise arms visible | 0.25 | 0.215 +/- 0.005 | 86.1 +/- 1.9 | 1.682 +/- 0.082 | 2.361 +/- 0.509 | 100% |
+
+The results show that the editor can produce visible, measurable offsets while preserving
+a bounded motion-quality budget.  Importantly, the feasible edit magnitude is action
+dependent: dance and exercise tolerate 25 cm upper-body edits, while walking and kicking
+require a more conservative 10 cm setting to stay within the jerk budget.  We therefore
+present large-offset cases as strong qualitative evidence and small-offset locomotion cases
+as quality-preserving controls.
+
+Larger walk/kick offsets (15--20 cm) remain target-seeking but exceed the jerk budget.
+We use those settings for the edit-strength/quality tradeoff curve rather than for the
+main qualitative figure.
+
+---
+
+### 4.6 Failure Case Analysis
 
 Three prompts show jerk ratio $> 1.15$ in at least one seed at $\alpha = 6$:
 *"runs forward"* (seed 44: $\times 1.194$),

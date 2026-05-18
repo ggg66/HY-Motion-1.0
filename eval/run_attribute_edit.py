@@ -354,15 +354,6 @@ def main():
     default_t_start = args.t_start
     default_t_end = args.t_end
     default_edge_frac = args.edge_frac
-    alpha_values = _parse_floats(args.alpha_values)
-    max_steer_ratios = _parse_floats(args.max_steer_ratios)
-    refine_steps_values = _parse_ints(args.refine_steps_values)
-    refine_lr_values = _parse_floats(args.refine_lr_values)
-    refine_constraint_weights = _parse_floats(args.refine_constraint_weights)
-    refine_delta_smoothness_values = _parse_floats(args.refine_delta_smoothness_values)
-    refine_joint_proximity_values = _parse_floats(args.refine_joint_proximity_values)
-    refine_smoothness_values = _parse_floats(args.refine_smoothness_values)
-
     device = torch.device(f"cuda:{args.gpu_id}" if torch.cuda.is_available() else "cpu")
     print("Loading HY-Motion pipeline...")
     pipeline = load_pipeline(args.model_path, device)
@@ -386,6 +377,22 @@ def main():
         args.t_end = float(case.get("t_end", default_t_end))
         args.edge_frac = float(case.get("edge_frac", default_edge_frac))
         delta_y_values = _parse_floats(str(case.get("delta_y_values", default_delta_y_values)))
+        alpha_values = _parse_floats(str(case.get("alpha_values", args.alpha_values)))
+        max_steer_ratios = _parse_floats(str(case.get("max_steer_ratios", args.max_steer_ratios)))
+        refine_steps_values = _parse_ints(str(case.get("refine_steps_values", args.refine_steps_values)))
+        refine_lr_values = _parse_floats(str(case.get("refine_lr_values", args.refine_lr_values)))
+        refine_constraint_weights = _parse_floats(
+            str(case.get("refine_constraint_weights", args.refine_constraint_weights))
+        )
+        refine_delta_smoothness_values = _parse_floats(
+            str(case.get("refine_delta_smoothness_values", args.refine_delta_smoothness_values))
+        )
+        refine_joint_proximity_values = _parse_floats(
+            str(case.get("refine_joint_proximity_values", args.refine_joint_proximity_values))
+        )
+        refine_smoothness_values = _parse_floats(
+            str(case.get("refine_smoothness_values", args.refine_smoothness_values))
+        )
 
         case_id = str(case.get("id", f"case_{prompt_idx:02d}"))
         print(f"\nPrompt {prompt_idx} [{case_id}]: {args.prompt}")
@@ -393,6 +400,12 @@ def main():
             f"  edit_joint={args.edit_joint}, dy={delta_y_values}, "
             f"window=({args.t_start:.2f}, {args.t_end:.2f})"
         )
+        if run_refine:
+            print(
+                f"  refine grid: steps={refine_steps_values}, lr={refine_lr_values}, "
+                f"cw={refine_constraint_weights}, ds={refine_delta_smoothness_values}, "
+                f"jp={refine_joint_proximity_values}, sm={refine_smoothness_values}"
+            )
         for seed in seeds:
             print(f"\nBaseline seed={seed}")
             with torch.no_grad():
