@@ -360,6 +360,28 @@ Larger walk/kick offsets (15--20 cm) remain target-seeking but exceed the jerk b
 We use those settings for the edit-strength/quality tradeoff curve rather than for the
 main qualitative figure.
 
+**Table 5. Sampling-time steering vs. latent refinement.**
+For each method, we select the best budget-aware configuration per seed from the same
+candidate set.
+
+| Case | Method | Achievement | Jerk Ratio | Budget Pass |
+|---|---|---:|---:|---:|
+| walk arm quality | sampling steer | 7.4 +/- 19.5 | 1.027 +/- 0.011 | 0.0% |
+| walk arm quality | latent refine | **97.2 +/- 2.6** | 1.401 +/- 0.027 | **100.0%** |
+| march arms quality | sampling steer | 18.6 +/- 21.3 | 1.040 +/- 0.013 | 0.0% |
+| march arms quality | latent refine | **85.8 +/- 1.5** | 1.583 +/- 0.206 | **100.0%** |
+| dance arm visible | sampling steer | 70.4 +/- 4.2 | 1.445 +/- 0.089 | 33.3% |
+| dance arm visible | latent refine | **94.3 +/- 1.2** | 1.416 +/- 0.086 | **100.0%** |
+| kick foot quality | sampling steer | 2.1 +/- 8.9 | 1.039 +/- 0.029 | 0.0% |
+| kick foot quality | latent refine | **93.0 +/- 6.5** | 1.535 +/- 0.064 | **100.0%** |
+| exercise arms visible | sampling steer | 11.0 +/- 9.5 | 1.071 +/- 0.014 | 0.0% |
+| exercise arms visible | latent refine | **86.1 +/- 1.9** | 1.682 +/- 0.082 | **100.0%** |
+
+Sampling-time steering preserves smoothness because its update is weak, but this is also
+why it often fails to produce a visible target-directed edit.  Latent refinement accepts
+a bounded smoothness cost and converts the same temporal attribute constraint into a
+measurable, visually inspectable edit.
+
 ---
 
 ### 4.6 Failure Case Analysis
