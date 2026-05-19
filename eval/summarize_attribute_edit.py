@@ -28,6 +28,12 @@ def _fmt_mean_std(values: Iterable[float], digits: int = 2) -> str:
     return f"{mean(vals):.{digits}f} +/- {pstdev(vals):.{digits}f}"
 
 
+def _metric_summary(rows: List[Dict[str, str]], key: str, digits: int = 3) -> str:
+    if not rows or key not in rows[0]:
+        return ""
+    return _fmt_mean_std([_as_float(r, key) for r in rows], digits)
+
+
 def _group_rows(rows: List[Dict[str, str]], group_fields: List[str]) -> Dict[str, List[Dict[str, str]]]:
     groups: Dict[str, List[Dict[str, str]]] = defaultdict(list)
     for row in rows:
@@ -74,6 +80,10 @@ def main() -> None:
                 "achievement_pct": _fmt_mean_std(achievement, 1),
                 "jerk_ratio": _fmt_mean_std(jerk, 3),
                 "foot_sliding_ratio": _fmt_mean_std(foot, 3),
+                "outside_window_drift_m": _metric_summary(group, "outside_window_drift_m", 3),
+                "outside_nonedited_joint_drift_m": _metric_summary(group, "outside_nonedited_joint_drift_m", 3),
+                "inside_nonedited_joint_drift_m": _metric_summary(group, "inside_nonedited_joint_drift_m", 3),
+                "root_drift_m": _metric_summary(group, "root_drift_m", 3),
                 "budget_pass_pct": f"{pass_rate:.1f}",
             }
         )
@@ -85,6 +95,10 @@ def main() -> None:
         "achievement_pct",
         "jerk_ratio",
         "foot_sliding_ratio",
+        "outside_window_drift_m",
+        "outside_nonedited_joint_drift_m",
+        "inside_nonedited_joint_drift_m",
+        "root_drift_m",
         "budget_pass_pct",
     ]
     if args.markdown:

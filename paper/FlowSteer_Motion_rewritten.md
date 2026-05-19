@@ -6,7 +6,7 @@ Text-to-motion generation has made rapid progress in producing realistic motions
 
 We present **FlowSteer-Motion**, an inference-time editing framework for a pretrained flow-matching text-to-motion model. Our initial sampling-time steering formulation injects differentiable constraint gradients into the Euler flow trajectory through a forward-kinematics decoder, but we find that such updates are often too weak to yield visible temporal edits under realistic quality budgets. To address this limitation, we introduce a **budget-aware latent refinement** stage that optimizes the generated motion latent after sampling while keeping the pretrained generator frozen. The refinement objective combines temporal joint-offset constraints with latent proximity, temporal smoothness, joint-space proximity, and jerk regularization. A latent trust mask and temporal edit window further restrict the optimization to pose-relevant dimensions and user-specified frames.
 
-Experiments on five temporal editing tasks show that latent refinement achieves stable target-directed edits across seven seeds, with 84.7--95.0% target achievement and 85.7--100% budget pass rate under a jerk-ratio threshold of 2.0. In contrast, sampling-time steering often preserves smoothness by making updates that are too weak to be visually useful, reaching only 2.1--70.4% achievement depending on the task. Ablations show that the latent trust mask and temporal edit mask are critical: removing them reduces budget pass rate from 100% to 40.0% and 33.3%, respectively, in the aligned three-seed ablation protocol. We further analyze the edit-strength/quality tradeoff and show that larger walk and kick edits remain target-seeking but exceed the motion-quality budget. These results support inference-time temporal motion editing as a practical alternative to retraining-based controllable generation.
+Experiments on five temporal editing tasks show that latent refinement achieves stable target-directed edits across seven seeds, with 84.7--95.0% target achievement and 85.7--100% budget pass rate under a jerk-ratio threshold of 2.0. In contrast, sampling-time steering often preserves smoothness by making updates that are too weak to be visually useful, reaching only 2.1--70.4% achievement depending on the task. Ablations show that the latent trust mask and temporal edit mask are critical: removing them reduces budget pass rate from 100% to 40.0% and 33.3%, respectively. Compared with target-only latent optimization, our full method improves achievement from 15.7% to 91.3% while reducing outside-window drift from 0.131 m to 0.024 m. These results support inference-time temporal motion editing as a practical alternative to retraining-based controllable generation.
 
 ## 1. Introduction
 
@@ -24,7 +24,7 @@ Our contributions are:
 
 1. We formulate inference-time temporal attribute editing for flow-matching text-to-motion generation, using differentiable FK constraints without retraining the backbone.
 2. We introduce budget-aware latent refinement, combining temporal joint-offset constraints with latent trust masking and smoothness/jerk regularization.
-3. We provide an evaluation protocol that reports target achievement, jerk ratio, foot-sliding ratio, and budget pass rate, making edit controllability and quality cost explicit.
+3. We provide an evaluation protocol that reports target achievement, jerk ratio, foot-sliding ratio, locality leakage, root drift, and budget pass rate, making edit controllability and preservation cost explicit.
 4. We show that latent refinement substantially outperforms sampling-time steering for visible temporal edits, while revealing an action-dependent edit-strength/quality tradeoff.
 
 ## 2. Related Work
@@ -171,6 +171,8 @@ We report:
 
 **Budget pass rate.** A run passes if target achievement is at least 75% and jerk ratio is at most 2.0. This makes the evaluation explicitly budget-aware: a method must both edit the motion and preserve acceptable smoothness.
 
+**Preservation and locality.** Since the goal is local editing rather than full regeneration, we additionally measure outside-window drift, non-edited joint drift, and root drift. These metrics quantify whether the edit leaks into unrelated frames, unrelated joints, or the global trajectory.
+
 ### 4.3 Main Temporal Editing Results
 
 Table 1 reports latent refinement results over seven seeds per task.
@@ -205,9 +207,20 @@ We ablate the refinement objective and masks on the five-task, three-seed protoc
 
 The latent trust mask is the dominant quality-control component: without it, target achievement remains high, but jerk and foot-sliding variance increase sharply and the pass rate drops to 40.0%. The temporal edit mask is equally important for controllability, reducing both achievement and pass rate when removed. The smoothness and proximity losses mainly act as secondary stabilizers: removing any one of them does not collapse the method, but it increases quality cost or variance.
 
-### 4.5 Sampling-Time Steering vs. Latent Refinement
+### 4.5 Objective-Only Latent Optimization Baseline
 
-We compare latent refinement with sampling-time steering on the same tasks and seeds. For each method, we select the best budget-aware configuration per seed from the candidate set. Table 3 summarizes the comparison.
+To separate our budget-aware design from generic latent objective optimization, we compare against a target-only baseline. This baseline optimizes the same temporal joint-offset objective but disables the latent trust mask, temporal edit mask, latent proximity, joint proximity, delta smoothness, and jerk regularization. It is therefore a DNO-style objective-only latent optimization baseline adapted to our flow-matching latent.
+
+| Method | Achievement | Jerk Ratio | Foot Sliding Ratio | Outside-Window Drift | Non-Edited Drift | Root Drift | Budget Pass |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Target-only latent optimization | 15.7 +/- 39.3 | 3.074 +/- 1.716 | 6.500 +/- 8.726 | 0.131 +/- 0.064 | 0.141 +/- 0.067 | 0.138 +/- 0.093 | 0.0% |
+| Budget-aware refinement | **91.3 +/- 5.7** | **1.523 +/- 0.153** | **1.413 +/- 0.616** | **0.024 +/- 0.006** | **0.019 +/- 0.005** | **0.036 +/- 0.013** | **100.0%** |
+
+The target-only baseline performs poorly on both sides of the editing problem: it fails to reliably reach the target and it strongly corrupts motion outside the intended edit. In contrast, the full method achieves high target satisfaction while reducing outside-window drift by more than 5x and non-edited joint drift by more than 7x. This result is central to our distinction from generic inference-time objective optimization: preservation and locality must be engineered and measured, not assumed.
+
+### 4.6 Sampling-Time Steering vs. Latent Refinement
+
+We compare latent refinement with sampling-time steering on the same tasks and seeds. For each method, we select the best budget-aware configuration per seed from the candidate set. Table 4 summarizes the comparison.
 
 | Case | Method | Achievement | Jerk Ratio | Budget Pass |
 |---|---|---:|---:|---:|
@@ -228,9 +241,9 @@ Figure 2 plots the same comparison as target achievement and budget pass rate.
 
 ![Sampling-time steering vs latent refinement](figures/fig_attribute_method_comparison.png)
 
-### 4.6 Edit-Strength/Quality Tradeoff
+### 4.7 Edit-Strength/Quality Tradeoff
 
-To test whether small walk/kick edits merely avoid the problem, we sweep larger offsets. Table 4 and Figure 3 show that larger edits remain target-seeking but exceed the jerk budget.
+To test whether small walk/kick edits merely avoid the problem, we sweep larger offsets. Table 5 and Figure 3 show that larger edits remain target-seeking but exceed the jerk budget.
 
 | Case | Target (m) | Achieved (m) | Achievement | Jerk Ratio | Foot Sliding Ratio | Budget Pass |
 |---|---:|---:|---:|---:|---:|---:|
@@ -247,7 +260,7 @@ Figure 3 visualizes this tradeoff curve for walking and kicking.
 
 ![Edit strength versus motion quality](figures/fig_attribute_tradeoff.png)
 
-### 4.7 Qualitative Videos
+### 4.8 Qualitative Videos
 
 We additionally provide comparison videos for the four main visualization cases:
 

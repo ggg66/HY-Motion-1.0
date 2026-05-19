@@ -96,6 +96,47 @@ def _mean_delta_along(
     return float(np.tensordot(delta, direction, axes=([-1], [0])).mean())
 
 
+def _mean_l2_delta(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.linalg.norm(a - b, axis=-1).mean())
+
+
+def _preservation_metrics(
+    baseline: np.ndarray,
+    edited: np.ndarray,
+    edited_joint_indices: List[int],
+    t_start: float,
+    t_end: float,
+) -> Dict[str, float]:
+    T, J, _ = baseline.shape
+    in_idx = _window_indices(T, t_start, t_end)
+    outside_mask = np.ones(T, dtype=bool)
+    outside_mask[in_idx] = False
+    nonedited = [j for j in range(J) if j not in set(edited_joint_indices)]
+    root = [0]
+
+    outside_drift = _mean_l2_delta(baseline[outside_mask], edited[outside_mask]) if outside_mask.any() else 0.0
+    outside_edited_drift = (
+        _mean_l2_delta(baseline[outside_mask][:, edited_joint_indices], edited[outside_mask][:, edited_joint_indices])
+        if outside_mask.any()
+        else 0.0
+    )
+    outside_nonedited_drift = (
+        _mean_l2_delta(baseline[outside_mask][:, nonedited], edited[outside_mask][:, nonedited])
+        if outside_mask.any() and nonedited
+        else 0.0
+    )
+    in_nonedited_drift = _mean_l2_delta(baseline[in_idx][:, nonedited], edited[in_idx][:, nonedited]) if nonedited else 0.0
+    root_drift = _mean_l2_delta(baseline[:, root], edited[:, root])
+
+    return {
+        "outside_window_drift_m": outside_drift,
+        "outside_edited_joint_drift_m": outside_edited_drift,
+        "outside_nonedited_joint_drift_m": outside_nonedited_drift,
+        "inside_nonedited_joint_drift_m": in_nonedited_drift,
+        "root_drift_m": root_drift,
+    }
+
+
 def _foot_sliding_proxy(joints_np: np.ndarray) -> float:
     feet = joints_np[:, [7, 8, 10, 11], :]
     foot_y = feet[:, :, 1]
@@ -160,6 +201,13 @@ def _metrics_row(
     foot_edit = _foot_sliding_proxy(edited_joints)
     jerk_ratio = q_edit.mean_jerk / (q_base.mean_jerk + 1e-9)
     foot_ratio = foot_edit / (foot_base + 1e-9)
+    preservation = _preservation_metrics(
+        baseline_joints,
+        edited_joints,
+        joint_indices,
+        args.t_start,
+        args.t_end,
+    )
 
     row = {
         "prompt": args.prompt,
@@ -174,6 +222,7 @@ def _metrics_row(
         "foot_sliding_base": foot_base,
         "foot_sliding_edited": foot_edit,
         "foot_sliding_ratio": foot_ratio,
+        **preservation,
         "meets_target": achievement_pct >= args.target_achievement_pct,
         "meets_jerk_budget": jerk_ratio <= args.jerk_budget,
         "meets_budget": achievement_pct >= args.target_achievement_pct and jerk_ratio <= args.jerk_budget,
@@ -308,7 +357,7 @@ def main():
     parser.add_argument("--duration", type=float, default=4.0)
     parser.add_argument("--seeds", default="43")
     parser.add_argument("--output_dir", default="output/attribute_sweep")
-    parser.add_argument("--method", default="both", choices=["steer", "refine", "both"])
+    parser.add_argument("--method", default="both", choices=["steer", "refine", "target_only", "both"])
     parser.add_argument("--edit_joint", default="right_arm", choices=sorted(_EDIT_JOINTS))
     parser.add_argument("--delta_x", type=float, default=0.0)
     parser.add_argument("--delta_y_values", default="0.20,0.35")
@@ -363,7 +412,8 @@ def main():
     )
 
     run_steer = args.method in ("steer", "both")
-    run_refine = args.method in ("refine", "both")
+    run_refine = args.method in ("refine", "target_only", "both")
+    run_target_only = args.method == "target_only"
     rows = []
 
     for prompt_idx, case in enumerate(prompt_cases):
@@ -461,6 +511,13 @@ def main():
                                 for d_smooth in refine_delta_smoothness_values:
                                     for j_prox in refine_joint_proximity_values:
                                         for smooth in refine_smoothness_values:
+                                            if run_target_only:
+                                                args.no_latent_mask = True
+                                                args.no_temporal_mask = True
+                                                args.refine_latent_proximity = 0.0
+                                                d_smooth = 0.0
+                                                j_prox = 0.0
+                                                smooth = 0.0
                                             t0 = time.time()
                                             edited = _run_refine_one(
                                                 pipeline,
@@ -482,7 +539,7 @@ def main():
                                                 edited,
                                                 seed,
                                                 delta_y,
-                                                "refine",
+                                                "target_only" if run_target_only else "refine",
                                                 {
                                                     "prompt_idx": prompt_idx,
                                                     "case_id": case_id,
