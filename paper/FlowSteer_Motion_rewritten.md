@@ -173,6 +173,8 @@ We report:
 
 **Preservation and locality.** Since the goal is local editing rather than full regeneration, we additionally measure outside-window drift, non-edited joint drift, and root drift. These metrics quantify whether the edit leaks into unrelated frames, unrelated joints, or the global trajectory.
 
+**Runtime.** We report per-sample editing time, excluding the baseline generation pass shared by all editing methods. On the 3-seed preservation protocol, budget-aware refinement takes 2.11 +/- 0.82 seconds per sample, target-only latent optimization takes 2.10 +/- 0.81 seconds, and sampling-time steering takes 2.80 +/- 0.03 seconds because it modifies the full generation trajectory.
+
 ### 4.3 Main Temporal Editing Results
 
 Table 1 reports latent refinement results over seven seeds per task.
@@ -218,6 +220,8 @@ To separate our budget-aware design from generic latent objective optimization, 
 
 The target-only baseline performs poorly on both sides of the editing problem: it fails to reliably reach the target and it strongly corrupts motion outside the intended edit. In contrast, the full method achieves high target satisfaction while reducing outside-window drift by more than 5x and non-edited joint drift by more than 7x. This result is central to our distinction from generic inference-time objective optimization: preservation and locality must be engineered and measured, not assumed.
 
+![Objective-only optimization vs. budget-aware refinement](figures/fig_preservation_baseline.png)
+
 ### 4.6 Sampling-Time Steering vs. Latent Refinement
 
 We compare latent refinement with sampling-time steering on the same tasks and seeds. For each method, we select the best budget-aware configuration per seed from the candidate set. Table 4 summarizes the comparison.
@@ -241,6 +245,10 @@ Figure 2 plots the same comparison as target achievement and budget pass rate.
 
 ![Sampling-time steering vs latent refinement](figures/fig_attribute_method_comparison.png)
 
+We further sweep the sampling-time steering strength \(\alpha \in \{5,10,20,40,80,120\}\) with max-steer ratios 0.3 and 1.0. Across 180 steering runs, the best average achievement remains only 24.2%, far below the 75% target threshold. Increasing \(\alpha\) primarily increases jerk and drift rather than solving the under-editing problem. This supports our central diagnosis: direct ODE-time guidance is a weak mechanism for local temporal attribute edits in this flow-matching T2M backbone.
+
+![Sampling-time steering under-editing sweep](figures/fig_steer_underedit_sweep.png)
+
 ### 4.7 Edit-Strength/Quality Tradeoff
 
 To test whether small walk/kick edits merely avoid the problem, we sweep larger offsets. Table 5 and Figure 3 show that larger edits remain target-seeking but exceed the jerk budget.
@@ -260,7 +268,11 @@ Figure 3 visualizes this tradeoff curve for walking and kicking.
 
 ![Edit strength versus motion quality](figures/fig_attribute_tradeoff.png)
 
-### 4.8 Qualitative Videos
+### 4.8 Task Expansion and Editability
+
+We also run a 10-case pilot to test broader action coverage. The additional cases include waving, reaching upward, jumping with raised arms, knee lifting, and stretching overhead. Waving is stable under the same quality budget, reaching 99.4% achievement and 100% pass rate. Jump-arm editing achieves 81.9% target achievement but passes only 66.7% of seeds, while knee lifting achieves 88.0% but passes only 33.3% due to high jerk. Reaching and stretching under-achieve with the initial offsets. These results are useful failure modes: they show that temporally localized editing is not uniformly easy, and that action-dependent editability should be measured rather than assumed.
+
+### 4.9 Qualitative Videos
 
 We additionally provide comparison videos for the four main visualization cases:
 

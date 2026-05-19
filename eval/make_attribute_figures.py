@@ -148,6 +148,86 @@ def _save_tradeoff(walk_csv: str, kick_csv: str, output_dir: str) -> None:
     print(f"Saved: {out}")
 
 
+def _save_underedit_sweep(steer_csv: str, output_dir: str) -> None:
+    if not os.path.exists(steer_csv):
+        return
+    rows = _read_csv(steer_csv)
+    grouped: Dict[Tuple[float, float], List[Dict[str, str]]] = defaultdict(list)
+    for row in rows:
+        grouped[(_float(row, "alpha"), _float(row, "max_steer_ratio"))].append(row)
+
+    fig, axes = plt.subplots(1, 2, figsize=(10.5, 3.9), dpi=220)
+    colors = {0.3: "#2563EB", 1.0: "#F97316"}
+    for ratio in sorted({key[1] for key in grouped}):
+        xs, ach, jerk, pass_rate = [], [], [], []
+        for alpha in sorted({key[0] for key in grouped if key[1] == ratio}):
+            group = grouped[(alpha, ratio)]
+            xs.append(alpha)
+            ach.append(mean(_float(r, "achievement_pct") for r in group))
+            jerk.append(mean(_float(r, "jerk_ratio") for r in group))
+            pass_rate.append(100.0 * sum(str(r.get("meets_budget", "")).lower() == "true" for r in group) / len(group))
+        axes[0].plot(xs, ach, marker="o", lw=2.1, color=colors.get(ratio), label=f"ratio={ratio:g}")
+        axes[1].plot(xs, jerk, marker="o", lw=2.1, color=colors.get(ratio), label=f"ratio={ratio:g}")
+
+    axes[0].axhline(75, color="#111827", lw=1.0, ls="--")
+    axes[0].set_xscale("log")
+    axes[0].set_xlabel("Sampling-time steering strength alpha")
+    axes[0].set_ylabel("Target achievement (%)")
+    axes[0].set_ylim(0, 80)
+    axes[0].grid(alpha=0.25)
+    axes[0].legend(frameon=False)
+
+    axes[1].axhline(2.0, color="#111827", lw=1.0, ls="--", label="Jerk budget")
+    axes[1].set_xscale("log")
+    axes[1].set_xlabel("Sampling-time steering strength alpha")
+    axes[1].set_ylabel("Jerk ratio")
+    axes[1].set_ylim(0.9, 1.8)
+    axes[1].grid(alpha=0.25)
+    axes[1].legend(frameon=False)
+
+    fig.suptitle("Sampling-time steering under-edits across guidance strengths", fontsize=12)
+    fig.tight_layout()
+    out = os.path.join(output_dir, "fig_steer_underedit_sweep.png")
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out}")
+
+
+def _save_preservation_baseline(full_csv: str, target_only_csv: str, output_dir: str) -> None:
+    if not os.path.exists(full_csv) or not os.path.exists(target_only_csv):
+        return
+    rows_by_method = {
+        "Target-only": _read_csv(target_only_csv),
+        "Budget-aware": _read_csv(full_csv),
+    }
+    metrics = [
+        ("achievement_pct", "Achievement (%)"),
+        ("jerk_ratio", "Jerk ratio"),
+        ("outside_window_drift_m", "Outside-window drift (m)"),
+        ("outside_nonedited_joint_drift_m", "Non-edited drift (m)"),
+        ("root_drift_m", "Root drift (m)"),
+    ]
+    fig, axes = plt.subplots(1, len(metrics), figsize=(14.5, 3.5), dpi=220)
+    colors = ["#9CA3AF", "#2563EB"]
+    for ax, (key, label) in zip(axes, metrics):
+        vals = [mean(_float(r, key) for r in rows_by_method[name]) for name in rows_by_method]
+        ax.bar(np.arange(len(vals)), vals, color=colors, width=0.65)
+        ax.set_title(label, fontsize=9)
+        ax.set_xticks(np.arange(len(vals)))
+        ax.set_xticklabels(list(rows_by_method.keys()), rotation=25, ha="right")
+        ax.grid(axis="y", alpha=0.25)
+        if key == "achievement_pct":
+            ax.axhline(75, color="#111827", lw=1.0, ls="--")
+        if key == "jerk_ratio":
+            ax.axhline(2.0, color="#111827", lw=1.0, ls="--")
+    fig.suptitle("Objective-only optimization corrupts locality and preservation", fontsize=12)
+    fig.tight_layout()
+    out = os.path.join(output_dir, "fig_preservation_baseline.png")
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved: {out}")
+
+
 def _axis_limits(motions: Iterable[np.ndarray]) -> Tuple[np.ndarray, float]:
     pts = np.concatenate([m.reshape(-1, 3) for m in motions], axis=0)
     center = pts.mean(axis=0)
@@ -215,11 +295,16 @@ def main() -> None:
     parser.add_argument("--compare_csv", default="output/attribute_paper_protocol_compare_3seed/selected.csv")
     parser.add_argument("--walk_tradeoff_csv", default="output/walk_smooth_sweep/selected.csv")
     parser.add_argument("--kick_tradeoff_csv", default="output/kick_smooth_sweep/selected.csv")
+    parser.add_argument("--steer_sweep_csv", default="output/steer_underedit_sweep_3seed/results.csv")
+    parser.add_argument("--preservation_full_csv", default="output/preservation_baseline_summary_3seed/full_results.csv")
+    parser.add_argument("--preservation_target_only_csv", default="output/preservation_baseline_summary_3seed/target_only_results.csv")
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     _save_method_comparison(args.compare_csv, args.output_dir)
     _save_tradeoff(args.walk_tradeoff_csv, args.kick_tradeoff_csv, args.output_dir)
+    _save_underedit_sweep(args.steer_sweep_csv, args.output_dir)
+    _save_preservation_baseline(args.preservation_full_csv, args.preservation_target_only_csv, args.output_dir)
     _save_qualitative(args.output_dir)
 
 
