@@ -6,7 +6,7 @@ Text-to-motion generation has made rapid progress in producing realistic motions
 
 We present **FlowSteer-Motion**, an inference-time editing framework for a pretrained flow-matching text-to-motion model. Our initial sampling-time steering formulation injects differentiable constraint gradients into the Euler flow trajectory through a forward-kinematics decoder, but we find that such updates are often too weak to yield visible temporal edits under realistic quality budgets. To address this limitation, we introduce a **budget-aware latent refinement** stage that optimizes the generated motion latent after sampling while keeping the pretrained generator frozen. The refinement objective combines temporal joint-offset constraints with latent proximity, temporal smoothness, joint-space proximity, and jerk regularization. A latent trust mask and temporal edit window further restrict the optimization to pose-relevant dimensions and user-specified frames.
 
-Experiments on five temporal editing tasks show that latent refinement achieves stable target-directed edits across three seeds, with 85.8--97.2% target achievement and 100% budget pass rate under a jerk-ratio threshold of 2.0. In contrast, sampling-time steering often preserves smoothness by making updates that are too weak to be visually useful, reaching only 2.1--70.4% achievement depending on the task. We further analyze the edit-strength/quality tradeoff and show that larger walk and kick edits remain target-seeking but exceed the motion-quality budget. These results support inference-time temporal motion editing as a practical alternative to retraining-based controllable generation.
+Experiments on five temporal editing tasks show that latent refinement achieves stable target-directed edits across seven seeds, with 84.7--95.0% target achievement and 85.7--100% budget pass rate under a jerk-ratio threshold of 2.0. In contrast, sampling-time steering often preserves smoothness by making updates that are too weak to be visually useful, reaching only 2.1--70.4% achievement depending on the task. Ablations show that the latent trust mask and temporal edit mask are critical: removing them reduces budget pass rate from 100% to 40.0% and 33.3%, respectively, in the aligned three-seed ablation protocol. We further analyze the edit-strength/quality tradeoff and show that larger walk and kick edits remain target-seeking but exceed the motion-quality budget. These results support inference-time temporal motion editing as a practical alternative to retraining-based controllable generation.
 
 ## 1. Introduction
 
@@ -173,25 +173,41 @@ We report:
 
 ### 4.3 Main Temporal Editing Results
 
-Table 1 reports latent refinement results over three seeds per task.
+Table 1 reports latent refinement results over seven seeds per task.
 
 | Case | Target | Achieved (m) | Achievement | Jerk Ratio | Foot Sliding Ratio | Budget Pass |
 |---|---:|---:|---:|---:|---:|---:|
-| walk arm | 0.10 | 0.097 +/- 0.003 | 97.2 +/- 2.6 | 1.401 +/- 0.027 | 0.918 +/- 0.039 | 100% |
-| march arms | 0.10 | 0.086 +/- 0.001 | 85.8 +/- 1.5 | 1.583 +/- 0.206 | 1.012 +/- 0.023 | 100% |
-| dance arm | 0.25 | 0.236 +/- 0.003 | 94.3 +/- 1.2 | 1.416 +/- 0.086 | 1.697 +/- 0.365 | 100% |
-| kick foot | 0.10 | 0.093 +/- 0.006 | 93.0 +/- 6.5 | 1.535 +/- 0.064 | 1.076 +/- 0.071 | 100% |
-| exercise arms | 0.25 | 0.215 +/- 0.005 | 86.1 +/- 1.9 | 1.682 +/- 0.082 | 2.361 +/- 0.509 | 100% |
+| walk arm | 0.10 | 0.093 +/- 0.006 | 92.8 +/- 6.2 | 1.370 +/- 0.145 | 0.957 +/- 0.065 | 100% |
+| march arms | 0.10 | 0.086 +/- 0.001 | 85.7 +/- 1.3 | 1.521 +/- 0.183 | 1.004 +/- 0.020 | 100% |
+| dance arm | 0.25 | 0.237 +/- 0.009 | 95.0 +/- 3.8 | 1.392 +/- 0.076 | 1.593 +/- 0.264 | 100% |
+| kick foot | 0.10 | 0.095 +/- 0.005 | 94.9 +/- 4.7 | 1.511 +/- 0.066 | 0.982 +/- 0.127 | 100% |
+| exercise arms | 0.25 | 0.212 +/- 0.008 | 84.7 +/- 3.3 | 1.746 +/- 0.652 | 2.022 +/- 0.789 | 85.7% |
 
-The editor consistently produces measurable target-directed changes while staying under the jerk budget. The strongest qualitative cases are dance and exercise, where 25 cm upper-body edits remain stable. Locomotion-heavy cases such as walking and kicking are more sensitive, so their quality-preserving edit magnitude is smaller.
+The editor consistently produces measurable target-directed changes while usually staying under the jerk budget. The strongest qualitative cases are dance and exercise, where 25 cm upper-body edits remain visible. Exercise has one high-jerk seed, reducing its budget pass rate to 85.7%; this is a useful reminder that large upper-body edits can still conflict with the motion prior for some sampled baselines. Locomotion-heavy cases such as walking and kicking are more sensitive, so their quality-preserving edit magnitude is smaller.
 
 Figure 1 visualizes representative baseline and edited skeleton snapshots. The gray skeleton shows the baseline, black shows the edited motion, and blue/orange indicate the edited limb and target joints.
 
 ![Temporal attribute edit snapshots](figures/fig_attribute_qualitative_snapshots.png)
 
-### 4.4 Sampling-Time Steering vs. Latent Refinement
+### 4.4 Refinement Ablation
 
-We compare latent refinement with sampling-time steering on the same tasks and seeds. For each method, we select the best budget-aware configuration per seed from the candidate set. Table 2 summarizes the comparison.
+We ablate the refinement objective and masks on the five-task, three-seed protocol. Table 2 reports aggregate results over 15 runs per configuration.
+
+| Configuration | Achievement | Jerk Ratio | Foot Sliding Ratio | Budget Pass |
+|---|---:|---:|---:|---:|
+| Full refinement | 91.3 +/- 5.7 | 1.523 +/- 0.153 | 1.413 +/- 0.616 | 100.0% |
+| w/o latent trust mask | 90.3 +/- 8.7 | 2.768 +/- 2.544 | 2.397 +/- 2.330 | 40.0% |
+| w/o temporal edit mask | 79.3 +/- 11.0 | 1.860 +/- 0.740 | 1.793 +/- 1.136 | 33.3% |
+| w/o delta smoothness | 91.3 +/- 5.7 | 1.539 +/- 0.155 | 1.422 +/- 0.614 | 100.0% |
+| w/o joint proximity | 91.5 +/- 5.7 | 1.579 +/- 0.161 | 1.629 +/- 0.854 | 100.0% |
+| w/o jerk regularization | 91.6 +/- 5.9 | 1.610 +/- 0.269 | 1.234 +/- 0.363 | 93.3% |
+| w/o latent proximity | 91.3 +/- 5.7 | 1.523 +/- 0.153 | 1.420 +/- 0.609 | 100.0% |
+
+The latent trust mask is the dominant quality-control component: without it, target achievement remains high, but jerk and foot-sliding variance increase sharply and the pass rate drops to 40.0%. The temporal edit mask is equally important for controllability, reducing both achievement and pass rate when removed. The smoothness and proximity losses mainly act as secondary stabilizers: removing any one of them does not collapse the method, but it increases quality cost or variance.
+
+### 4.5 Sampling-Time Steering vs. Latent Refinement
+
+We compare latent refinement with sampling-time steering on the same tasks and seeds. For each method, we select the best budget-aware configuration per seed from the candidate set. Table 3 summarizes the comparison.
 
 | Case | Method | Achievement | Jerk Ratio | Budget Pass |
 |---|---|---:|---:|---:|
@@ -212,9 +228,9 @@ Figure 2 plots the same comparison as target achievement and budget pass rate.
 
 ![Sampling-time steering vs latent refinement](figures/fig_attribute_method_comparison.png)
 
-### 4.5 Edit-Strength/Quality Tradeoff
+### 4.6 Edit-Strength/Quality Tradeoff
 
-To test whether small walk/kick edits merely avoid the problem, we sweep larger offsets. Table 3 and Figure 3 show that larger edits remain target-seeking but exceed the jerk budget.
+To test whether small walk/kick edits merely avoid the problem, we sweep larger offsets. Table 4 and Figure 3 show that larger edits remain target-seeking but exceed the jerk budget.
 
 | Case | Target (m) | Achieved (m) | Achievement | Jerk Ratio | Foot Sliding Ratio | Budget Pass |
 |---|---:|---:|---:|---:|---:|---:|
@@ -231,7 +247,7 @@ Figure 3 visualizes this tradeoff curve for walking and kicking.
 
 ![Edit strength versus motion quality](figures/fig_attribute_tradeoff.png)
 
-### 4.6 Qualitative Videos
+### 4.7 Qualitative Videos
 
 We additionally provide comparison videos for the four main visualization cases:
 
@@ -258,4 +274,4 @@ Our method optimizes the latent after sampling, so it adds inference time compar
 
 ## 7. Conclusion
 
-We introduced FlowSteer-Motion, an inference-time framework for temporal attribute editing in text-to-motion generation. Starting from the observation that sampling-time steering is too weak for visible local edits, we proposed budget-aware latent refinement, which directly optimizes the generated latent under differentiable joint constraints and motion-quality regularizers. Across five temporal editing tasks, the method achieves stable target-directed changes with 100% budget pass rate under our evaluation protocol, while exposing the edit-strength/quality tradeoff for locomotion-heavy motions. These results show that frozen T2M models can support practical, measurable temporal motion editing without retraining.
+We introduced FlowSteer-Motion, an inference-time framework for temporal attribute editing in text-to-motion generation. Starting from the observation that sampling-time steering is too weak for visible local edits, we proposed budget-aware latent refinement, which directly optimizes the generated latent under differentiable joint constraints and motion-quality regularizers. Across five temporal editing tasks and seven seeds, the method achieves stable target-directed changes with 84.7--95.0% target achievement and 85.7--100% budget pass rate, while exposing the edit-strength/quality tradeoff for locomotion-heavy motions. These results show that frozen T2M models can support practical, measurable temporal motion editing without retraining.
